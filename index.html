@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiveSlides</title>
+<meta name="description" content="Listens to your microphone in real time and turns the conversation into a slide deck automatically.">
+<meta name="theme-color" content="#f5f2ea">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="LiveSlides">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><rect width=%2224%22 height=%2224%22 rx=%226%22 fill=%22%23f5f2ea%22/><g fill=%22none%22 stroke=%22%231a1a1a%22 stroke-width=%221.8%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22><ellipse cx=%226.5%22 cy=%2214.5%22 rx=%224.2%22 ry=%225.2%22/><ellipse cx=%2217.5%22 cy=%2214.5%22 rx=%224.2%22 ry=%225.2%22/><path d=%22M10.4,10.3 Q12,5.8 13.6,10.3%22/></g><path fill=%22%231a1a1a%22 stroke=%22none%22 d=%22M19.3,4.6 C19.6,5.9 19.6,5.9 21.1,6.6 C19.6,7.3 19.6,7.3 19.3,8.6 C19,7.3 19,7.3 17.5,6.6 C19,5.9 19,5.9 19.3,4.6 Z%22/></svg>">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<style>
+  :root{
+    --bg:#f5f2ea; --surface:#ffffff; --surface-2:#efeae0; --border:#e2dccd;
+    --text:#1c1a15; --muted:#7a7362; --accent:#c4622d; --accent-2:#2f6e5c;
+    --danger:#b3432b; --radius:14px; --serif:Georgia,'Iowan Old Style',serif;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#17150f; --surface:#221f18; --surface-2:#2a2620; --border:#3a352a; --text:#f1ede2; --muted:#a49b86; }
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--sans);
+    min-height:100vh; padding-bottom:60px;
+  }
+  a{color:inherit;}
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:18px 20px; border-bottom:1px solid var(--border); position:sticky; top:0;
+    background:var(--bg); z-index:20;
+  }
+  .brand{display:flex; align-items:center; gap:10px;}
+  .brand svg{width:30px; height:30px; flex:none;}
+  .brand .word{font-family:var(--serif); font-size:22px; font-weight:700; letter-spacing:.2px;}
+  .icon-btn{
+    display:inline-flex; align-items:center; justify-content:center;
+    width:38px; height:38px; border-radius:10px; border:none; background:transparent;
+    cursor:pointer; color:var(--muted); transition:background .15s,color .15s; flex:none;
+  }
+  .icon-btn:hover{background:var(--surface-2); color:var(--text);}
+  .icon-btn svg{width:20px; height:20px;}
+  main{max-width:920px; margin:0 auto; padding:24px 20px;}
+
+  .panel{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; margin-bottom:20px;}
+
+  .control-row{display:flex; align-items:center; gap:16px; flex-wrap:wrap;}
+  .btn{
+    display:inline-flex; align-items:center; gap:8px; padding:12px 22px; border-radius:10px;
+    border:1px solid var(--border); background:var(--surface); cursor:pointer; font-size:15px;
+    font-weight:600; color:var(--text); transition:transform .1s, background .15s;
+  }
+  .btn:hover{background:var(--surface-2);}
+  .btn:active{transform:scale(.97);}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff;}
+  .btn.primary:hover{background:#ad5526;}
+  .btn.stop{background:var(--danger); border-color:var(--danger); color:#fff;}
+  .btn.stop:hover{background:#962f1b;}
+  .btn:disabled{opacity:.45; cursor:not-allowed;}
+  .btn svg{width:16px; height:16px;}
+
+  .status{display:flex; align-items:center; gap:8px; font-size:14px; color:var(--muted);}
+  .dot{width:9px; height:9px; border-radius:50%; background:var(--muted); flex:none;}
+  .dot.live{background:var(--danger); animation:pulse 1.4s infinite;}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(179,67,43,.5);}70%{box-shadow:0 0 0 8px rgba(179,67,43,0);}100%{box-shadow:0 0 0 0 rgba(179,67,43,0);}}
+
+  .hint{font-size:13px; color:var(--muted); margin-top:10px; line-height:1.5;}
+  .hint b{color:var(--text);}
+
+  details.transcript{margin-top:14px;}
+  details.transcript summary{cursor:pointer; font-size:13px; color:var(--muted); user-select:none;}
+  .transcript-box{
+    margin-top:10px; max-height:160px; overflow-y:auto; font-size:13px; line-height:1.6;
+    background:var(--surface-2); border-radius:10px; padding:12px; white-space:pre-wrap;
+  }
+  .transcript-box .interim{color:var(--muted); font-style:italic;}
+
+  h2.section-title{font-family:var(--serif); font-size:20px; margin:0 0 14px;}
+
+  .deck{display:flex; flex-direction:column; gap:18px;}
+  .slide{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;}
+  .slide-head{padding:18px 20px 6px;}
+  .slide-topic{font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--accent-2); font-weight:700;}
+  .slide-title{font-family:var(--serif); font-size:24px; margin:4px 0 12px;}
+  .slide-bullets{margin:0 0 14px; padding-left:20px; line-height:1.7;}
+  .slide-bullets li{margin-bottom:4px;}
+  .slide-images{display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:6px; padding:0 20px 18px;}
+  .slide-images img{width:100%; height:110px; object-fit:cover; border-radius:8px; background:var(--surface-2); display:block;}
+  .slide-images .ph{width:100%; height:110px; border-radius:8px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:12px;}
+  .slide-meta{padding:0 20px 16px; font-size:12px; color:var(--muted);}
+
+  .empty{text-align:center; padding:50px 20px; color:var(--muted);}
+  .empty svg{width:46px; height:46px; opacity:.5; margin-bottom:10px;}
+
+  .exports{display:flex; gap:10px; flex-wrap:wrap;}
+
+  .sessions-list{display:flex; flex-direction:column; gap:8px;}
+  .session-row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:10px 12px; border:1px solid var(--border); border-radius:10px; font-size:13px;
+  }
+  .session-row .meta{color:var(--muted);}
+  .session-row button{font-size:12px; padding:6px 10px;}
+
+  /* modal */
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center;
+    justify-content:center; z-index:100; padding:20px;
+  }
+  .modal-backdrop.open{display:flex;}
+  .modal{background:var(--surface); border-radius:var(--radius); padding:24px; width:100%; max-width:440px; max-height:88vh; overflow-y:auto;}
+  .modal h2{font-family:var(--serif); margin-top:0;}
+  .field{margin-bottom:16px;}
+  .field label{display:block; font-size:13px; font-weight:600; margin-bottom:6px;}
+  .field input,.field select{
+    width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border);
+    background:var(--bg); color:var(--text); font-size:14px;
+  }
+  .field .note{font-size:12px; color:var(--muted); margin-top:6px; line-height:1.5;}
+  .modal-actions{display:flex; justify-content:flex-end; gap:10px; margin-top:6px;}
+  .toast{
+    position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#222; color:#fff;
+    padding:12px 18px; border-radius:10px; font-size:14px; z-index:200; max-width:90vw; box-shadow:0 6px 20px rgba(0,0,0,.3);
+  }
+  .toast.error{background:var(--danger);}
+  @media (max-width:520px){
+    .brand .word{font-size:19px;}
+    .btn{width:100%; justify-content:center;}
+    .control-row{flex-direction:column; align-items:stretch;}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="6.5" cy="14.5" rx="4.2" ry="5.2"/><ellipse cx="17.5" cy="14.5" rx="4.2" ry="5.2"/><path d="M10.4,10.3 Q12,5.8 13.6,10.3"/></g><path fill="currentColor" stroke="none" d="M19.3,4.6 C19.6,5.9 19.6,5.9 21.1,6.6 C19.6,7.3 19.6,7.3 19.3,8.6 C19,7.3 19,7.3 17.5,6.6 C19,5.9 19,5.9 19.3,4.6 Z"/></svg>
+    <span class="word">LiveSlides</span>
+  </div>
+  <button class="icon-btn" onclick="openSettings()" title="Settings" aria-label="Settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+</header>
+
+<main>
+
+  <div class="panel">
+    <div class="control-row">
+      <button class="btn primary" id="listenBtn" onclick="toggleListening()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        <span id="listenBtnLabel">Start listening</span>
+      </button>
+      <div class="status" id="statusLine">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">Not listening</span>
+      </div>
+    </div>
+    <div class="hint" id="hintLine">
+      Speak normally — after about 30s the first slide appears, then <b>LiveSlides</b> checks every 2 minutes whether the topic has moved on and adds a new slide when it has. Requires your own Anthropic API key (see settings) and a Chromium-based browser (Chrome/Edge) for microphone transcription.
+    </div>
+    <details class="transcript">
+      <summary>Live transcript</summary>
+      <div class="transcript-box" id="transcriptBox">—</div>
+    </details>
+  </div>
+
+  <div class="panel">
+    <h2 class="section-title">Slides</h2>
+    <div class="deck" id="deck">
+      <div class="empty" id="deckEmpty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="13" rx="2"/><path d="M3 15l5-4 4 3 5-5 4 4"/></svg>
+        <div>No slides yet. Start listening to generate your first one.</div>
+      </div>
+    </div>
+    <div class="exports" id="exportsRow" style="margin-top:16px; display:none;">
+      <button class="btn" onclick="exportJSON()">Download JSON</button>
+      <button class="btn" onclick="exportPDF()">Download PDF</button>
+      <button class="btn" onclick="exportPPTX()">Download PPTX</button>
+    </div>
+  </div>
+
+  <div class="panel" id="sessionsPanel" style="display:none;">
+    <h2 class="section-title">Past sessions</h2>
+    <div class="sessions-list" id="sessionsList"></div>
+  </div>
+
+</main>
+
+<!-- Settings modal -->
+<div class="modal-backdrop" id="settingsBackdrop">
+  <div class="modal">
+    <h2>Settings</h2>
+    <div class="field">
+      <label for="inApiKey">Anthropic API key</label>
+      <input type="password" id="inApiKey" placeholder="sk-ant-...">
+      <div class="note">Stored only in your browser (localStorage) and sent only to <b>api.anthropic.com</b>, directly from this page. Get a key at <b>console.anthropic.com</b>.</div>
+    </div>
+    <div class="field">
+      <label for="inModel">Model</label>
+      <input type="text" id="inModel" placeholder="claude-sonnet-5">
+      <div class="note">Any valid Claude model ID your key has access to.</div>
+    </div>
+    <div class="field">
+      <label for="inLang">Speech recognition language</label>
+      <select id="inLang">
+        <option value="en-US">English (US)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="ru-RU">Русский</option>
+        <option value="pl-PL">Polski</option>
+        <option value="es-ES">Español</option>
+        <option value="fr-FR">Français</option>
+        <option value="de-DE">Deutsch</option>
+        <option value="uk-UA">Українська</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeSettings()">Cancel</button>
+      <button class="btn primary" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jspdf@4.2.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/dist/pptxgen.bundle.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
