@@ -12,7 +12,7 @@ const LS = {
 
 const FIRST_SLIDE_DELAY_MS = 30_000;   // first slide appears ~30s after start
 const RETRY_EMPTY_DELAY_MS = 10_000;   // if nothing said yet, retry sooner
-const CHECK_INTERVAL_MS = 120_000;     // topic re-check cadence: 2 minutes
+const CHECK_INTERVAL_MS = 90_000;      // topic re-check cadence: 90 seconds
 const CHUNK_MS = 12_000;               // length of each audio chunk sent to Whisper
 const MAX_SESSIONS_KEPT = 20;
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -63,6 +63,7 @@ const S = {
   countdownHandle: null,
   nextCheckAt: null,
   sessionId: null,
+  debugLog: [],
 };
 
 /* ============================ Utilities ============================ */
@@ -94,6 +95,37 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* ============================ Debug panel ============================ */
+
+function logDebug(msg) {
+  S.debugLog.push({ t: Date.now(), msg });
+  if (S.debugLog.length > 100) S.debugLog.shift();
+  renderDebug();
+}
+
+function fmtTime(ts) {
+  try { return new Date(ts).toLocaleTimeString([], { hour12: false }); } catch (e) { return ''; }
+}
+
+function renderDebug() {
+  if (!$('debugBackdrop').classList.contains('open')) return; // skip work while closed
+
+  const transcriptEl = $('debugTranscript');
+  const said = S.fullTranscript.slice(0, S.fullTranscript.length - S.pending.length);
+  transcriptEl.innerHTML = (said ? escapeHtml(said) : '') +
+    (S.pending ? '<span class="pending-span">' + escapeHtml(S.pending) + '</span>' : '') ||
+    '<span class="empty-note">Nothing transcribed yet.</span>';
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+  const logEl = $('debugLogList');
+  logEl.innerHTML = S.debugLog.slice().reverse().map((e) =>
+    `<div class="log-row"><span class="log-time">${fmtTime(e.t)}</span>${escapeHtml(e.msg)}</div>`
+  ).join('') || '<span class="empty-note">No activity yet.</span>';
+}
+
+function openDebug() { $('debugBackdrop').classList.add('open'); renderDebug(); }
+function closeDebug() { $('debugBackdrop').classList.remove('open'); }
+
 /* ============================ Settings modal ============================ */
 
 function openSettings() {
@@ -115,6 +147,7 @@ function saveSettings() {
   toast('Settings saved');
 }
 $('settingsBackdrop').addEventListener('click', (e) => { if (e.target.id === 'settingsBackdrop') closeSettings(); });
+$('debugBackdrop').addEventListener('click', (e) => { if (e.target.id === 'debugBackdrop') closeDebug(); });
 
 /* ============================ Mic + Whisper transcription ============================ */
 
@@ -152,15 +185,23 @@ function recordChunk(ms) {
 async function recordingLoop() {
   while (S.listening) {
     const blob = await recordChunk(CHUNK_MS);
-    if (!blob || !S.listening || blob.size < 1000) continue;
+    if (!blob || !S.listening) continue;
+    if (blob.size < 1000) { logDebug(`Recorded chunk too small (${blob.size}B) — skipped.`); continue; }
     try {
+      logDebug(`Sending ${(blob.size / 1024).toFixed(1)}KB audio chunk to Whisper…`);
       const text = await transcribeChunk(blob);
-      if (text && text.trim()) {
-        S.fullTranscript += text.trim() + ' ';
-        S.pending += text.trim() + ' ';
+      const clean = (text || '').trim();
+      if (clean) {
+        S.fullTranscript += clean + ' ';
+        S.pending += clean + ' ';
+        logDebug(`Transcribed: "${clean}"`);
+        renderDebug();
+      } else {
+        logDebug('Transcribed: (silence / no speech detected)');
       }
     } catch (err) {
       console.warn('Transcription failed:', err);
+      logDebug('⚠ Transcription failed: ' + err.message);
       if (err.fatal) { toast('Transcription failed: ' + err.message, true); stopListening(); return; }
     }
   }
@@ -227,19 +268,23 @@ async function startListening() {
   S.currentTopic = null;
   S.startedAt = Date.now();
   S.sessionId = uid();
+  S.debugLog = [];
   renderPreview();
+  logDebug(`Listening started. Mic format: ${S.recorderMime || 'default'}. First slide in ${FIRST_SLIDE_DELAY_MS / 1000}s, then checks every ${CHECK_INTERVAL_MS / 1000}s.`);
 
   recordingLoop();
 
   $('listenBtnLabel').textContent = 'Stop listening';
   $('listenBtn').classList.add('active');
   $('listenIcon').outerHTML = '<span class="pulse" id="listenIcon"></span>';
+  $('manualSlideBtn').hidden = false;
 
-  scheduleCheck(FIRST_SLIDE_DELAY_MS, true);
+  scheduleCheck(FIRST_SLIDE_DELAY_MS, 'first');
   startCountdown();
 }
 
 function stopListening() {
+  logDebug('Listening stopped.');
   S.listening = false;
   clearTimeout(S.timerHandle);
   clearInterval(S.countdownHandle);
@@ -251,6 +296,7 @@ function stopListening() {
   $('listenBtn').classList.remove('active');
   const pulseEl = $('listenIcon');
   if (pulseEl) pulseEl.outerHTML = '<svg id="listenIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+  $('manualSlideBtn').hidden = true;
   $('statusCaption').textContent = '';
 
   if (S.slides.length) {
@@ -272,41 +318,84 @@ function startCountdown() {
 
 /* ============================ Topic check loop ============================ */
 
-function scheduleCheck(delay, isFirst) {
+function scheduleCheck(delay, mode) {
   clearTimeout(S.timerHandle);
   S.nextCheckAt = Date.now() + delay;
-  S.timerHandle = setTimeout(() => runCheck(isFirst), delay);
+  S.timerHandle = setTimeout(() => runCheck(mode), delay);
 }
 
-async function runCheck(isFirst) {
+async function runCheck(mode) {
   if (!S.listening) return;
   const chunk = S.pending.trim();
   S.pending = '';
 
   if (!chunk) {
-    scheduleCheck(isFirst ? RETRY_EMPTY_DELAY_MS : CHECK_INTERVAL_MS, isFirst);
+    logDebug(`Check (${mode}) fired — nothing new said, skipping.`);
+    scheduleCheck(mode === 'first' ? RETRY_EMPTY_DELAY_MS : CHECK_INTERVAL_MS, mode);
     return;
   }
 
+  logDebug(`Check (${mode}) fired — requesting slide info from Claude for: "${chunk}"`);
   try {
-    const result = await analyzeTopic(chunk, isFirst ? null : S.currentTopic, isFirst);
-    if (result && (isFirst || result.topic_changed)) {
+    const result = await analyzeTopic(chunk, mode === 'first' ? null : S.currentTopic, mode);
+    if (result && (mode === 'first' || result.topic_changed)) {
+      logDebug(`→ New slide: "${result.title}"`);
       await addSlide(result, chunk);
       S.currentTopic = result.topic;
+    } else {
+      logDebug('→ Topic unchanged — no new slide.');
     }
   } catch (err) {
     console.error('LiveSlides topic check failed:', err);
+    logDebug('⚠ Topic check failed: ' + err.message);
     toast('Topic check failed: ' + err.message, true);
     if (err.fatal) { stopListening(); return; }
   }
 
-  if (S.listening) scheduleCheck(CHECK_INTERVAL_MS, false);
+  if (S.listening) scheduleCheck(CHECK_INTERVAL_MS, 'check');
 }
 
-async function analyzeTopic(chunk, currentTopic, isFirst) {
-  const userMsg = isFirst
-    ? `Current topic: none (this is the start of the conversation).\n\nTranscript so far:\n"""${chunk}"""\n\nThis is the first check — always produce a topic and slide content from this transcript.`
-    : `Current topic: "${currentTopic}"\n\nNew transcript since the last check:\n"""${chunk}"""\n\nDecide if the topic has changed meaningfully. If yes, produce updated slide content for the NEW topic based only on this new chunk.`;
+async function manualSlide() {
+  if (!S.listening) return;
+  const chunk = S.pending.trim();
+  if (!chunk) { toast("Nothing new said since the last slide yet.", true); return; }
+  S.pending = '';
+
+  const btn = $('manualSlideBtn');
+  btn.disabled = true;
+  toast('Generating slide…');
+  logDebug(`Manual slide requested — sending to Claude: "${chunk}"`);
+
+  try {
+    const result = await analyzeTopic(chunk, S.currentTopic, 'manual');
+    if (result) {
+      logDebug(`→ New slide: "${result.title}"`);
+      await addSlide(result, chunk);
+      S.currentTopic = result.topic;
+    }
+  } catch (err) {
+    console.error('LiveSlides manual slide failed:', err);
+    logDebug('⚠ Manual slide failed: ' + err.message);
+    toast('Could not generate slide: ' + err.message, true);
+    S.pending = chunk + ' ' + S.pending; // don't lose this transcript chunk on failure
+    if (err.fatal) { stopListening(); return; }
+  } finally {
+    btn.disabled = false;
+  }
+
+  // restart the regular cadence from now, so it doesn't fire again moments later
+  if (S.listening) scheduleCheck(CHECK_INTERVAL_MS, 'check');
+}
+
+async function analyzeTopic(chunk, currentTopic, mode) {
+  let userMsg;
+  if (mode === 'first') {
+    userMsg = `Current topic: none (this is the start of the conversation).\n\nTranscript so far:\n"""${chunk}"""\n\nThis is the first check — always produce a topic and slide content from this transcript.`;
+  } else if (mode === 'manual') {
+    userMsg = `Current topic: "${currentTopic || 'none yet'}"\n\nTranscript since the last slide:\n"""${chunk}"""\n\nThe user tapped "New slide now" and wants a slide generated immediately from this transcript, whether or not it's a brand-new topic. Always produce topic/title/bullets summarizing this chunk.`;
+  } else {
+    userMsg = `Current topic: "${currentTopic}"\n\nNew transcript since the last check:\n"""${chunk}"""\n\nDecide if the topic has changed meaningfully. If yes, produce updated slide content for the NEW topic based only on this new chunk.`;
+  }
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -638,7 +727,10 @@ window.addEventListener('beforeunload', (e) => {
 
 function wireUpButtons() {
   $('settingsBtn').addEventListener('click', openSettings);
+  $('debugBtn').addEventListener('click', openDebug);
+  $('debugCloseBtn').addEventListener('click', closeDebug);
   $('listenBtn').addEventListener('click', toggleListening);
+  $('manualSlideBtn').addEventListener('click', manualSlide);
   $('settingsCloseBtn').addEventListener('click', closeSettings);
   $('settingsSaveBtn').addEventListener('click', saveSettings);
   $('exportJsonBtn').addEventListener('click', exportJSON);

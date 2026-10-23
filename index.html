@@ -77,8 +77,18 @@
   }
   .dots button.active{background:var(--accent);}
 
-  /* ---- single action button ---- */
+  /* ---- action buttons ---- */
   .action{flex:none; display:flex; flex-direction:column; align-items:center; gap:8px;}
+  .action-row{display:flex; align-items:center; gap:10px;}
+  .btn-manual{
+    display:inline-flex; align-items:center; justify-content:center; width:48px; height:48px;
+    border-radius:50%; border:1px solid var(--border); background:var(--surface); color:var(--text);
+    cursor:pointer; transition:background .15s, transform .1s;
+  }
+  .btn-manual:hover{background:var(--surface-2);}
+  .btn-manual:disabled{opacity:.45; cursor:not-allowed;}
+  .btn-manual:active{transform:scale(.93);}
+  .btn-manual svg{width:20px; height:20px;}
   .btn-listen{
     display:inline-flex; align-items:center; gap:10px; padding:16px 32px; border-radius:999px;
     border:none; background:var(--accent); color:#fff; font-size:16px; font-weight:600; cursor:pointer;
@@ -128,6 +138,14 @@
   .session-row button{font-size:12px; padding:6px 10px;}
   .empty-note{font-size:13px; color:var(--muted);}
 
+  .debug-box{
+    max-height:180px; overflow-y:auto; font-size:12.5px; line-height:1.6; background:var(--surface-2);
+    border-radius:10px; padding:10px 12px; white-space:pre-wrap; font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  .debug-box .pending-span{color:var(--accent); font-weight:600;}
+  .debug-log .log-row{white-space:pre-wrap; margin-bottom:5px;}
+  .debug-log .log-time{color:var(--muted); margin-right:8px;}
+
   .toast{
     position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#222; color:#fff;
     padding:12px 18px; border-radius:10px; font-size:14px; z-index:200; max-width:90vw; box-shadow:0 6px 20px rgba(0,0,0,.3);
@@ -142,9 +160,14 @@
     <svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="6.5" cy="14.5" rx="4.2" ry="5.2"/><ellipse cx="17.5" cy="14.5" rx="4.2" ry="5.2"/><path d="M10.4,10.3 Q12,5.8 13.6,10.3"/></g><path fill="currentColor" stroke="none" d="M19.3,4.6 C19.6,5.9 19.6,5.9 21.1,6.6 C19.6,7.3 19.6,7.3 19.3,8.6 C19,7.3 19,7.3 17.5,6.6 C19,5.9 19,5.9 19.3,4.6 Z"/></svg>
     <span class="word">LiveSlides</span>
   </div>
-  <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-  </button>
+  <div style="display:flex; gap:4px;">
+    <button class="icon-btn" id="debugBtn" title="Debug: live transcript &amp; activity log" aria-label="Debug">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+    </button>
+    <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
 </header>
 
 <main>
@@ -154,10 +177,15 @@
   </div>
 
   <div class="action">
-    <button class="btn-listen" id="listenBtn">
-      <svg id="listenIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-      <span id="listenBtnLabel">Start listening</span>
-    </button>
+    <div class="action-row">
+      <button class="btn-listen" id="listenBtn">
+        <svg id="listenIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        <span id="listenBtnLabel">Start listening</span>
+      </button>
+      <button class="btn-manual" id="manualSlideBtn" title="Generate a slide now" aria-label="Generate a slide now" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+    </div>
     <div class="status-caption" id="statusCaption"></div>
   </div>
 </main>
@@ -215,6 +243,20 @@
     <div class="modal-actions">
       <button class="btn" id="settingsCloseBtn">Close</button>
       <button class="btn primary" id="settingsSaveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Debug modal -->
+<div class="modal-backdrop" id="debugBackdrop">
+  <div class="modal" id="debugPanel">
+    <h2>Debug</h2>
+    <h3 style="margin-top:0; padding-top:0; border-top:none;">Live transcript</h3>
+    <div class="debug-box" id="debugTranscript"></div>
+    <h3>Activity log</h3>
+    <div class="debug-box debug-log" id="debugLogList"></div>
+    <div class="modal-actions">
+      <button class="btn" id="debugCloseBtn">Close</button>
     </div>
   </div>
 </div>
