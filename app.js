@@ -163,16 +163,28 @@ function extForMime(mime) {
   return 'webm';
 }
 
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 async function setupVolumeMonitor(stream) {
+  // This is purely diagnostic (drives the silence-skip heuristic and the
+  // debug readout). It must NEVER be able to delay or block the actual
+  // recording loop starting - guard every await with a hard timeout.
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     S.audioCtx = new AudioCtx();
+    logDebug(`AudioContext created (state: ${S.audioCtx.state}).`);
     // AudioContexts created after an `await` can start life 'suspended' (the
     // user-gesture that unlocked audio no longer covers this async point),
     // which makes the analyser read flat silence forever regardless of real
-    // mic input. Explicitly resume and confirm it actually took.
+    // mic input. resume() is documented to always resolve/reject, but guard
+    // it with a timeout anyway in case some browser's implementation hangs.
     if (S.audioCtx.state !== 'running') {
-      try { await S.audioCtx.resume(); } catch (e) { /* ignore, logged below via state check */ }
+      await withTimeout(S.audioCtx.resume().catch((e) => logDebug('resume() rejected: ' + e.message)), 1500, 'timed out');
     }
     logDebug(`Mic level monitor ready (AudioContext state: ${S.audioCtx.state}).`);
     if (S.audioCtx.state !== 'running') {
@@ -209,27 +221,42 @@ function teardownVolumeMonitor() {
 
 function recordChunk(ms) {
   return new Promise((resolve) => {
-    if (!S.listening || !S.micStream) return resolve(null);
+    if (!S.listening || !S.micStream) { logDebug('recordChunk: not listening or no mic stream — aborting.'); return resolve(null); }
+    const tracks = S.micStream.getAudioTracks();
+    if (!tracks.length || tracks[0].readyState !== 'live' || tracks[0].muted) {
+      logDebug(`⚠ Mic track state looks wrong (tracks: ${tracks.length}, readyState: ${tracks[0]?.readyState}, muted: ${tracks[0]?.muted}).`);
+    }
     const chunks = [];
     let rec;
     try {
       rec = S.recorderMime ? new MediaRecorder(S.micStream, { mimeType: S.recorderMime }) : new MediaRecorder(S.micStream);
-    } catch (e) { resolve(null); return; }
+    } catch (e) { logDebug('⚠ MediaRecorder creation failed: ' + e.message); resolve(null); return; }
     rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
     rec.onstop = () => resolve(new Blob(chunks, { type: S.recorderMime || 'audio/webm' }));
-    rec.onerror = () => resolve(null);
+    rec.onerror = (e) => { logDebug('⚠ MediaRecorder error: ' + (e.error?.message || e.error || 'unknown')); resolve(null); };
     S.activeRecorder = rec;
-    rec.start();
+    try {
+      rec.start();
+    } catch (e) {
+      logDebug('⚠ MediaRecorder.start() threw: ' + e.message);
+      resolve(null);
+      return;
+    }
     setTimeout(() => { if (rec.state !== 'inactive') rec.stop(); }, ms);
   });
 }
 
 async function recordingLoop() {
+  logDebug('Recording loop started.');
+  let chunkNum = 0;
   while (S.listening) {
+    chunkNum++;
     S.chunkPeak = 0;
+    logDebug(`Recording chunk #${chunkNum} (${CHUNK_MS / 1000}s)…`);
     const blob = await recordChunk(CHUNK_MS);
     const peak = S.chunkPeak;
-    if (!blob || !S.listening) continue;
+    if (!S.listening) { logDebug('Stopped while recording — discarding this chunk.'); continue; }
+    if (!blob) { logDebug('⚠ No blob produced for this chunk — retrying.'); continue; }
     if (blob.size < 1000) { logDebug(`Recorded chunk too small (${blob.size}B) — skipped.`); continue; }
 
     // Fail OPEN, not closed: a broken/suspended level monitor must never permanently
@@ -329,9 +356,14 @@ async function startListening() {
   S.debugLog = [];
   renderPreview();
   logDebug(`Listening started. Mic format: ${S.recorderMime || 'default'}. Tap + any time to generate a slide from what's been said so far.`);
+  try {
+    const track = stream.getAudioTracks()[0];
+    const settings = track?.getSettings ? track.getSettings() : {};
+    logDebug(`Mic track: "${track?.label || 'unknown device'}" — readyState: ${track?.readyState}, muted: ${track?.muted}, sampleRate: ${settings.sampleRate || '?'}, channels: ${settings.channelCount || '?'}.`);
+  } catch (e) { /* ignore, purely diagnostic */ }
 
-  await setupVolumeMonitor(stream);
-  recordingLoop();
+  recordingLoop(); // must start immediately; never gated behind the diagnostic monitor below
+  setupVolumeMonitor(stream);
 
   $('listenBtnLabel').textContent = 'Stop listening';
   $('listenBtn').classList.add('active');
