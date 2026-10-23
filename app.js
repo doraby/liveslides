@@ -41,7 +41,8 @@ function buildSystemPrompt() {
 The transcript may be in any language. Produce: a short topic label, a slide title, and 2-5 concise bullet points summarizing the key points actually said. ${langInstruction}
 The bullets field is REQUIRED and must NEVER be empty, even for a short or sparse transcript chunk - if there isn't much said, still break it into at least 2 short bullets rather than omitting them or leaving the array empty. A slide with a title but no bullets is not acceptable.
 Also produce a short ENGLISH image-search query (2-4 words), since image search only works in English.
-Base bullets only on what was actually said in the transcript chunk - never invent facts. Keep titles and bullets short and readable on a presentation slide. Always call the report_topic_analysis tool with your answer.`;
+Base bullets only on what was actually said in the transcript chunk - never invent facts. Keep titles and bullets short and readable on a presentation slide.
+The user message is split into two clearly labeled parts: BACKGROUND CONTEXT (earlier conversation, given only so you correctly understand references, pronouns, names and terminology - never summarize it) and SLIDE CONTENT (the only part to actually turn into the topic/title/bullets). Keep that separation strict. Always call the report_topic_analysis tool with your answer.`;
 }
 
 /* ============================ State ============================ */
@@ -440,6 +441,9 @@ async function manualSlide() {
   if (!S.listening) return;
   const chunk = S.pending.trim();
   if (!chunk) { toast("Nothing new said since the last slide yet.", true); return; }
+  // Everything transcribed before this chunk, kept as background context only
+  // (never summarized itself) to help Claude resolve references/continuity.
+  const priorContext = S.fullTranscript.slice(0, S.fullTranscript.length - S.pending.length).trim();
   S.pending = '';
   renderLiveTranscript();
 
@@ -449,7 +453,7 @@ async function manualSlide() {
   logDebug(`Slide requested — sending to Claude: "${chunk}"`);
 
   try {
-    const result = await analyzeTopic(chunk, S.currentTopic);
+    const result = await analyzeTopic(chunk, S.currentTopic, priorContext);
     if (result) {
       logDebug(`→ New slide: "${result.title}"`);
       await addSlide(result, chunk);
@@ -467,8 +471,17 @@ async function manualSlide() {
   }
 }
 
-async function analyzeTopic(chunk, currentTopic) {
-  const userMsg = `Current topic so far: "${currentTopic || 'none yet'}"\n\nTranscript since the last slide:\n"""${chunk}"""\n\nSummarize this transcript chunk into slide content (topic/title/bullets).`;
+async function analyzeTopic(chunk, currentTopic, priorContext) {
+  const contextSnippet = (priorContext || '').slice(-1500).trim();
+  const userMsg = `Current topic so far: "${currentTopic || 'none yet'}"
+
+=== BACKGROUND CONTEXT (earlier in this conversation — for understanding references, pronouns, names and terminology ONLY. Do NOT summarize this or pull facts from it into the bullets.) ===
+${contextSnippet || '(nothing said before this — this is the start of the conversation)'}
+
+=== SLIDE CONTENT (the ONLY part to actually summarize into the topic/title/bullets) ===
+"""${chunk}"""
+
+Using the BACKGROUND CONTEXT only to correctly understand the SLIDE CONTENT, summarize the SLIDE CONTENT section into slide content (topic/title/bullets).`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -580,7 +593,6 @@ function renderPreview() {
   const area = $('previewArea');
   const dots = $('previewDots');
   $('saveSlidesBtn').hidden = S.slides.length === 0;
-  $('slideNav').hidden = S.slides.length === 0;
 
   if (!S.slides.length) {
     area.innerHTML = `
@@ -604,11 +616,20 @@ function renderPreview() {
     ).join('') + '</div>';
   }
 
+  const navHtml = S.slides.length > 1 ? `
+      <button class="slide-arrow left" data-action="prev-slide" aria-label="Previous slide" ${idx <= 0 ? 'disabled' : ''}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button class="slide-arrow right" data-action="next-slide" aria-label="Next slide" ${idx >= S.slides.length - 1 ? 'disabled' : ''}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>` : '';
+
   area.innerHTML = `
     <div class="slide">
       <button class="slide-delete-btn" data-action="delete-slide" title="Delete this slide" aria-label="Delete this slide">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
       </button>
+      ${navHtml}
       <div class="slide-head">
         <div class="slide-topic">${escapeHtml(slide.topic)}</div>
         <div class="slide-title">${escapeHtml(slide.title)}</div>
@@ -620,9 +641,6 @@ function renderPreview() {
   dots.innerHTML = S.slides.map((s, i) =>
     `<button class="${i === idx ? 'active' : ''}" data-index="${i}" aria-label="Slide ${i + 1}"></button>`
   ).join('');
-
-  $('prevSlideBtn').disabled = idx <= 0;
-  $('nextSlideBtn').disabled = idx >= S.slides.length - 1;
 }
 
 function goToSlide(i) {
@@ -851,10 +869,10 @@ function wireUpButtons() {
     const btn = e.target.closest('button[data-index]');
     if (btn) goToSlide(Number(btn.dataset.index));
   });
-  $('prevSlideBtn').addEventListener('click', prevSlide);
-  $('nextSlideBtn').addEventListener('click', nextSlide);
   $('previewArea').addEventListener('click', (e) => {
-    if (e.target.closest('[data-action="delete-slide"]')) deleteCurrentSlide();
+    if (e.target.closest('[data-action="delete-slide"]')) { deleteCurrentSlide(); return; }
+    if (e.target.closest('[data-action="prev-slide"]')) { prevSlide(); return; }
+    if (e.target.closest('[data-action="next-slide"]')) { nextSlide(); return; }
   });
 }
 

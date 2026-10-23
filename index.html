@@ -63,6 +63,16 @@
   }
   .slide-delete-btn:hover{background:rgba(179,67,43,.85);}
   .slide-delete-btn svg{width:14px; height:14px;}
+  .slide-arrow{
+    position:absolute; top:50%; transform:translateY(-50%); z-index:5; width:34px; height:34px; border-radius:50%;
+    border:none; background:rgba(20,18,14,.4); color:#fff; display:flex; align-items:center; justify-content:center;
+    cursor:pointer; transition:background .15s;
+  }
+  .slide-arrow:hover{background:rgba(20,18,14,.65);}
+  .slide-arrow:disabled{opacity:.25; cursor:not-allowed;}
+  .slide-arrow.left{left:8px;}
+  .slide-arrow.right{right:8px;}
+  .slide-arrow svg{width:18px; height:18px;}
   .slide-head{flex:1.3; min-width:0; padding:5%; overflow-y:auto;}
   .slide-topic{font-size:.72em; text-transform:uppercase; letter-spacing:.08em; color:var(--accent-2); font-weight:700;}
   .slide-title{font-family:var(--serif); font-size:clamp(16px,3vw,28px); margin:.25em 0 .5em; line-height:1.2;}
@@ -81,8 +91,6 @@
   }
   .empty-slide svg{width:38px; height:38px; opacity:.5;}
 
-  .slide-nav{display:flex; align-items:center; gap:4px;}
-  .slide-nav .icon-btn:disabled{opacity:.3; cursor:not-allowed;}
   .dots{display:flex; gap:7px; flex:none;}
   .dots button{
     width:8px; height:8px; border-radius:50%; border:none; background:var(--border); cursor:pointer; padding:0;
@@ -195,15 +203,7 @@
 <main>
   <div class="preview-wrap">
     <div id="previewArea"></div>
-    <div class="slide-nav" id="slideNav" hidden>
-      <button class="icon-btn" id="prevSlideBtn" aria-label="Previous slide">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-      </button>
-      <div class="dots" id="previewDots"></div>
-      <button class="icon-btn" id="nextSlideBtn" aria-label="Next slide">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-      </button>
-    </div>
+    <div class="dots" id="previewDots"></div>
   </div>
 
   <div class="action">
