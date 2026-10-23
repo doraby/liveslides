@@ -11,6 +11,7 @@ const LS = {
 };
 
 const CHUNK_MS = 12_000;               // length of each audio chunk sent to Whisper
+const IMAGES_PER_SLIDE = 3;
 const SILENCE_PEAK_THRESHOLD = 3;      // byte-deviation (0-128) below which a chunk is treated as no-signal
 const MAX_SESSIONS_KEPT = 20;
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -23,7 +24,7 @@ const TOOL_SCHEMA = {
     properties: {
       topic: { type: 'string', description: 'Short topic label, 2-5 words, in the output language given in the system prompt.' },
       title: { type: 'string', description: 'Slide title, concise, suitable as a presentation headline, in the output language given in the system prompt.' },
-      bullets: { type: 'array', items: { type: 'string' }, description: '3 to 5 short bullet points summarizing what was actually said, in the output language given in the system prompt. Never invent facts not present in the transcript.' },
+      bullets: { type: 'array', items: { type: 'string' }, minItems: 2, description: 'REQUIRED, never empty: 2 to 5 short bullet points summarizing what was actually said, in the output language given in the system prompt. Never invent facts not present in the transcript. Even a very short or thin transcript chunk must still produce at least 2 bullets - break whatever was said into smaller observations rather than leaving this empty.' },
       image_query: { type: 'string', description: 'A short ENGLISH image-search query (2-4 words) that would find photos illustrating this topic, regardless of the transcript or output language.' },
     },
     required: ['topic', 'title', 'bullets'],
@@ -37,7 +38,8 @@ function buildSystemPrompt() {
     : `Always write the topic, title and bullets in ${lang}, translating from the transcript's own language if it differs. The transcript itself may be in any language - translate its meaning faithfully, don't just transliterate.`;
 
   return `You are turning a chunk of live, real-time spoken-conversation transcript into one slide for a slide deck.
-The transcript may be in any language. Produce: a short topic label, a slide title, and 3-5 concise bullet points summarizing the key points actually said. ${langInstruction}
+The transcript may be in any language. Produce: a short topic label, a slide title, and 2-5 concise bullet points summarizing the key points actually said. ${langInstruction}
+The bullets field is REQUIRED and must NEVER be empty, even for a short or sparse transcript chunk - if there isn't much said, still break it into at least 2 short bullets rather than omitting them or leaving the array empty. A slide with a title but no bullets is not acceptable.
 Also produce a short ENGLISH image-search query (2-4 words), since image search only works in English.
 Base bullets only on what was actually said in the transcript chunk - never invent facts. Keep titles and bullets short and readable on a presentation slide. Always call the report_topic_analysis tool with your answer.`;
 }
@@ -502,12 +504,28 @@ async function analyzeTopic(chunk, currentTopic) {
 
 /* ============================ Slides ============================ */
 
+function fallbackBulletsFromChunk(chunk) {
+  // Last-resort guarantee: if Claude ever returns no usable bullets, split the
+  // raw transcript chunk into a couple of short fragments instead of showing
+  // a title-only slide with nothing underneath it.
+  const clean = (chunk || '').trim();
+  if (!clean) return [];
+  const parts = clean.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  return (parts.length ? parts : [clean]).slice(0, 3).map((p) => (p.length > 140 ? p.slice(0, 137) + '…' : p));
+}
+
 async function addSlide(result, sourceChunk) {
+  let bullets = Array.isArray(result.bullets) ? result.bullets.filter((b) => b && String(b).trim()) : [];
+  if (!bullets.length) {
+    bullets = fallbackBulletsFromChunk(sourceChunk);
+    logDebug('⚠ Claude returned no bullets for this slide — used a fallback summary from the raw transcript instead.');
+  }
+
   const slide = {
     id: uid(),
     topic: result.topic || 'Untitled topic',
     title: result.title || result.topic || 'Untitled',
-    bullets: Array.isArray(result.bullets) ? result.bullets : [],
+    bullets,
     imageQuery: result.image_query || result.topic || '',
     images: [],
     imagesLoading: true,
@@ -519,7 +537,7 @@ async function addSlide(result, sourceChunk) {
   renderPreview();
 
   try {
-    slide.images = await fetchCommonsImages(slide.imageQuery, 5);
+    slide.images = await fetchCommonsImages(slide.imageQuery, IMAGES_PER_SLIDE);
   } catch (e) {
     console.warn('Image search failed:', e);
     slide.images = [];
@@ -578,7 +596,7 @@ function renderPreview() {
   const bulletsHtml = slide.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join('');
   let imagesHtml = '';
   if (slide.imagesLoading) {
-    imagesHtml = '<div class="slide-images">' + Array(5).fill('<div class="ph">…</div>').join('') + '</div>';
+    imagesHtml = '<div class="slide-images">' + Array(IMAGES_PER_SLIDE).fill('<div class="ph">…</div>').join('') + '</div>';
   } else if (slide.images.length) {
     imagesHtml = '<div class="slide-images">' + slide.images.map((img) =>
       `<img src="${img.url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'—'}))">`
@@ -737,7 +755,7 @@ async function exportPDF() {
       y += lines.length * 18 + 4;
     }
 
-    const imgs = (slide.images || []).slice(0, 5);
+    const imgs = (slide.images || []).slice(0, IMAGES_PER_SLIDE);
     if (imgs.length) {
       const boxW = 160, boxH = 120, gap = 10;
       const totalW = imgs.length * boxW + (imgs.length - 1) * gap;
@@ -773,7 +791,7 @@ async function exportPPTX() {
       x: 0.4, y: 1.4, w: 9.2, h: 2.1, fontSize: 14, color: '1C1A15',
     });
 
-    const imgs = (slide.images || []).slice(0, 5);
+    const imgs = (slide.images || []).slice(0, IMAGES_PER_SLIDE);
     if (imgs.length) {
       const boxW = 1.7, boxH = 1.28, gap = 0.15;
       const totalW = imgs.length * boxW + (imgs.length - 1) * gap;
