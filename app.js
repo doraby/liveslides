@@ -3,15 +3,16 @@
 /* ============================ Config ============================ */
 
 const LS = {
-  apiKey: 'liveslides.apiKey',
+  anthropicKey: 'liveslides.anthropicKey',
+  openaiKey: 'liveslides.openaiKey',
   model: 'liveslides.model',
-  lang: 'liveslides.lang',
   sessions: 'liveslides.sessions',
 };
 
 const FIRST_SLIDE_DELAY_MS = 30_000;   // first slide appears ~30s after start
 const RETRY_EMPTY_DELAY_MS = 10_000;   // if nothing said yet, retry sooner
 const CHECK_INTERVAL_MS = 120_000;     // topic re-check cadence: 2 minutes
+const CHUNK_MS = 12_000;               // length of each audio chunk sent to Whisper
 const MAX_SESSIONS_KEPT = 20;
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -22,45 +23,46 @@ const TOOL_SCHEMA = {
     type: 'object',
     properties: {
       topic_changed: { type: 'boolean', description: 'True if this transcript chunk represents a new discussion topic (or this is the very first topic of the conversation).' },
-      topic: { type: 'string', description: 'Short topic label, 2-5 words.' },
-      title: { type: 'string', description: 'Slide title, concise, suitable as a presentation headline.' },
-      bullets: { type: 'array', items: { type: 'string' }, description: '3 to 5 short bullet points summarizing what was actually said about this topic. Never invent facts not present in the transcript.' },
-      image_query: { type: 'string', description: 'A short English image-search query (2-4 words) that would find photos illustrating this topic.' },
+      topic: { type: 'string', description: 'Short topic label, 2-5 words, in the same language as the transcript.' },
+      title: { type: 'string', description: 'Slide title, concise, suitable as a presentation headline, in the same language as the transcript.' },
+      bullets: { type: 'array', items: { type: 'string' }, description: '3 to 5 short bullet points summarizing what was actually said about this topic, in the same language as the transcript. Never invent facts not present in the transcript.' },
+      image_query: { type: 'string', description: 'A short ENGLISH image-search query (2-4 words) that would find photos illustrating this topic, regardless of the transcript language.' },
     },
     required: ['topic_changed', 'topic'],
   },
 };
 
 const SYSTEM_PROMPT = `You are analyzing a live, real-time transcript of spoken conversation to automatically build a slide deck.
-You will be given the current topic (if any) and the most recent chunk of transcript.
-Decide whether this chunk represents a new discussion topic. If it does (or if there is no current topic yet), produce: a short topic label, a slide title, 3-5 concise bullet points summarizing the key points actually said, and a short English image-search query.
+You will be given the current topic (if any) and the most recent chunk of transcript. The transcript may be in any language.
+Decide whether this chunk represents a new discussion topic. If it does (or if there is no current topic yet), produce: a short topic label, a slide title, and 3-5 concise bullet points summarizing the key points actually said - all written in the SAME LANGUAGE as the transcript. Also produce a short ENGLISH image-search query (2-4 words), since image search only works in English.
 Base bullets only on what was actually said in the transcript chunk - never invent facts. Keep titles and bullets short and readable on a presentation slide. Always call the report_topic_analysis tool with your answer.`;
 
 /* ============================ State ============================ */
 
 const S = {
-  recognition: null,
   listening: false,
+  micStream: null,
+  recorderMime: '',
+  activeRecorder: null,
   fullTranscript: '',
-  interim: '',
-  pending: '',          // text accumulated since the last check
+  pending: '',
   slides: [],
+  previewIndex: 0,
   currentTopic: null,
   startedAt: null,
   timerHandle: null,
   countdownHandle: null,
   nextCheckAt: null,
   sessionId: null,
-  viewingPastSession: false,
 };
 
 /* ============================ Utilities ============================ */
 
 function $(id) { return document.getElementById(id); }
 
-function getApiKey() { return localStorage.getItem(LS.apiKey) || ''; }
+function getAnthropicKey() { return localStorage.getItem(LS.anthropicKey) || ''; }
+function getOpenaiKey() { return localStorage.getItem(LS.openaiKey) || ''; }
 function getModel() { return localStorage.getItem(LS.model) || 'claude-sonnet-5'; }
-function getLang() { return localStorage.getItem(LS.lang) || 'en-US'; }
 
 function toast(msg, isError) {
   const el = document.createElement('div');
@@ -78,80 +80,103 @@ function fmtDate(ts) {
   try { return new Date(ts).toLocaleString(); } catch (e) { return ''; }
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 /* ============================ Settings modal ============================ */
 
 function openSettings() {
-  $('inApiKey').value = getApiKey();
+  $('inOpenaiKey').value = getOpenaiKey();
+  $('inAnthropicKey').value = getAnthropicKey();
   $('inModel').value = getModel();
-  $('inLang').value = getLang();
+  renderSessionsList();
+  renderExportsAvailability();
   $('settingsBackdrop').classList.add('open');
 }
 function closeSettings() { $('settingsBackdrop').classList.remove('open'); }
 function saveSettings() {
-  localStorage.setItem(LS.apiKey, $('inApiKey').value.trim());
+  localStorage.setItem(LS.openaiKey, $('inOpenaiKey').value.trim());
+  localStorage.setItem(LS.anthropicKey, $('inAnthropicKey').value.trim());
   localStorage.setItem(LS.model, $('inModel').value.trim() || 'claude-sonnet-5');
-  localStorage.setItem(LS.lang, $('inLang').value);
   closeSettings();
   toast('Settings saved');
 }
 $('settingsBackdrop')?.addEventListener('click', (e) => { if (e.target.id === 'settingsBackdrop') closeSettings(); });
 
-/* ============================ Speech recognition ============================ */
+/* ============================ Mic + Whisper transcription ============================ */
 
-function speechSupported() {
-  return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+function pickRecorderMime() {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  for (const c of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c;
+  }
+  return '';
 }
 
-function createRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const r = new SR();
-  r.continuous = true;
-  r.interimResults = true;
-  r.lang = getLang();
-
-  r.onresult = (e) => {
-    let finalChunk = '';
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const res = e.results[i];
-      if (res.isFinal) finalChunk += res[0].transcript + ' ';
-      else interim += res[0].transcript;
-    }
-    if (finalChunk) {
-      S.fullTranscript += finalChunk;
-      S.pending += finalChunk;
-    }
-    S.interim = interim;
-    renderTranscript();
-  };
-
-  r.onerror = (e) => {
-    if (e.error === 'not-allowed' || e.error === 'audio-capture' || e.error === 'service-not-allowed') {
-      toast('Microphone access denied or unavailable — stopping.', true);
-      stopListening();
-    }
-    // other errors (e.g. transient "no-speech", "network") are non-fatal; onend will restart
-  };
-
-  r.onend = () => {
-    if (S.listening) {
-      try { r.start(); } catch (e) { /* already starting */ }
-    }
-  };
-
-  return r;
+function extForMime(mime) {
+  if (mime.includes('mp4')) return 'mp4';
+  if (mime.includes('ogg')) return 'ogg';
+  return 'webm';
 }
 
-function renderTranscript() {
-  const box = $('transcriptBox');
-  const full = S.fullTranscript.trim();
-  box.innerHTML = (full ? escapeHtml(full) : '') +
-    (S.interim ? ' <span class="interim">' + escapeHtml(S.interim) + '</span>' : '') ||
-    '—';
+function recordChunk(ms) {
+  return new Promise((resolve) => {
+    if (!S.listening || !S.micStream) return resolve(null);
+    const chunks = [];
+    let rec;
+    try {
+      rec = S.recorderMime ? new MediaRecorder(S.micStream, { mimeType: S.recorderMime }) : new MediaRecorder(S.micStream);
+    } catch (e) { resolve(null); return; }
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = () => resolve(new Blob(chunks, { type: S.recorderMime || 'audio/webm' }));
+    rec.onerror = () => resolve(null);
+    S.activeRecorder = rec;
+    rec.start();
+    setTimeout(() => { if (rec.state !== 'inactive') rec.stop(); }, ms);
+  });
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function recordingLoop() {
+  while (S.listening) {
+    const blob = await recordChunk(CHUNK_MS);
+    if (!blob || !S.listening || blob.size < 1000) continue;
+    try {
+      const text = await transcribeChunk(blob);
+      if (text && text.trim()) {
+        S.fullTranscript += text.trim() + ' ';
+        S.pending += text.trim() + ' ';
+      }
+    } catch (err) {
+      console.warn('Transcription failed:', err);
+      if (err.fatal) { toast('Transcription failed: ' + err.message, true); stopListening(); return; }
+    }
+  }
+}
+
+async function transcribeChunk(blob) {
+  const ext = extForMime(S.recorderMime);
+  const form = new FormData();
+  form.append('file', blob, 'chunk.' + ext);
+  form.append('model', 'whisper-1');
+  const tail = S.fullTranscript.slice(-200);
+  if (tail) form.append('prompt', tail);
+
+  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + getOpenaiKey() },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(body);
+    const err = new Error(`OpenAI API ${res.status}${res.status === 401 ? ' (check your API key)' : ''}`);
+    err.fatal = res.status === 401 || res.status === 403;
+    throw err;
+  }
+  const data = await res.json();
+  return data.text || '';
 }
 
 /* ============================ Start / stop ============================ */
@@ -161,37 +186,42 @@ function toggleListening() {
   else startListening();
 }
 
-function startListening() {
-  if (!speechSupported()) {
-    toast('This browser does not support speech recognition. Use Chrome or Edge.', true);
+async function startListening() {
+  if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast('This browser does not support microphone recording.', true);
     return;
   }
-  if (!getApiKey()) {
-    toast('Add your Anthropic API key in Settings first.', true);
+  if (!getOpenaiKey() || !getAnthropicKey()) {
+    toast('Add your OpenAI and Anthropic API keys in Settings first.', true);
     openSettings();
     return;
   }
 
-  S.viewingPastSession = false;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    toast('Microphone access denied.', true);
+    return;
+  }
+
   S.listening = true;
+  S.micStream = stream;
+  S.recorderMime = pickRecorderMime();
   S.fullTranscript = '';
-  S.interim = '';
   S.pending = '';
   S.slides = [];
+  S.previewIndex = 0;
   S.currentTopic = null;
   S.startedAt = Date.now();
   S.sessionId = uid();
-  renderTranscript();
-  renderDeck();
+  renderPreview();
 
-  S.recognition = createRecognition();
-  try { S.recognition.start(); } catch (e) { /* ignore */ }
+  recordingLoop();
 
   $('listenBtnLabel').textContent = 'Stop listening';
-  $('listenBtn').classList.remove('primary');
-  $('listenBtn').classList.add('stop');
-  $('statusDot').classList.add('live');
-  $('exportsRow').style.display = 'none';
+  $('listenBtn').classList.add('active');
+  $('listenIcon').outerHTML = '<span class="pulse" id="listenIcon"></span>';
 
   scheduleCheck(FIRST_SLIDE_DELAY_MS, true);
   startCountdown();
@@ -202,20 +232,19 @@ function stopListening() {
   clearTimeout(S.timerHandle);
   clearInterval(S.countdownHandle);
   S.nextCheckAt = null;
-  if (S.recognition) { try { S.recognition.stop(); } catch (e) { /* ignore */ } }
+  if (S.activeRecorder && S.activeRecorder.state !== 'inactive') { try { S.activeRecorder.stop(); } catch (e) { /* ignore */ } }
+  if (S.micStream) { S.micStream.getTracks().forEach((t) => t.stop()); S.micStream = null; }
 
   $('listenBtnLabel').textContent = 'Start listening';
-  $('listenBtn').classList.remove('stop');
-  $('listenBtn').classList.add('primary');
-  $('statusDot').classList.remove('live');
-  $('statusText').textContent = 'Not listening';
+  $('listenBtn').classList.remove('active');
+  const pulseEl = $('listenIcon');
+  if (pulseEl) pulseEl.outerHTML = '<svg id="listenIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+  $('statusCaption').textContent = '';
 
   if (S.slides.length) {
     saveSessionToHistory();
-    $('exportsRow').style.display = 'flex';
-    toast('Session saved locally. Export as JSON, PDF or PPTX below.');
+    toast('Session saved. Export it from Settings.');
   }
-  renderSessionsList();
 }
 
 function startCountdown() {
@@ -224,7 +253,7 @@ function startCountdown() {
     if (!S.listening) { clearInterval(S.countdownHandle); return; }
     if (S.nextCheckAt) {
       const secs = Math.max(0, Math.round((S.nextCheckAt - Date.now()) / 1000));
-      $('statusText').textContent = `Listening — next check in ${secs}s (${S.slides.length} slide${S.slides.length === 1 ? '' : 's'})`;
+      $('statusCaption').textContent = `Listening — next check in ${secs}s (${S.slides.length} slide${S.slides.length === 1 ? '' : 's'})`;
     }
   }, 1000);
 }
@@ -271,7 +300,7 @@ async function analyzeTopic(chunk, currentTopic, isFirst) {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': getApiKey(),
+      'x-api-key': getAnthropicKey(),
       'anthropic-version': ANTHROPIC_VERSION,
       'anthropic-dangerous-direct-browser-access': 'true',
     },
@@ -314,7 +343,8 @@ async function addSlide(result, sourceChunk) {
     createdAt: Date.now(),
   };
   S.slides.push(slide);
-  renderDeck();
+  S.previewIndex = S.slides.length - 1;
+  renderPreview();
 
   try {
     slide.images = await fetchCommonsImages(slide.imageQuery, 5);
@@ -323,7 +353,7 @@ async function addSlide(result, sourceChunk) {
     slide.images = [];
   }
   slide.imagesLoading = false;
-  renderDeck();
+  renderPreview();
 }
 
 async function fetchCommonsImages(query, count) {
@@ -356,40 +386,50 @@ async function fetchCommonsImages(query, count) {
   return out;
 }
 
-function renderDeck() {
-  const deck = $('deck');
-  const empty = $('deckEmpty');
+function renderPreview() {
+  const area = $('previewArea');
+  const dots = $('previewDots');
+
   if (!S.slides.length) {
-    deck.innerHTML = '';
-    deck.appendChild(empty);
+    area.innerHTML = `
+      <div class="empty-slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="13" rx="2"/><path d="M3 15l5-4 4 3 5-5 4 4"/></svg>
+        <div>No slides yet — start listening to generate your first one.</div>
+      </div>`;
+    dots.innerHTML = '';
     return;
   }
-  deck.innerHTML = '';
-  for (const slide of S.slides) {
-    const el = document.createElement('div');
-    el.className = 'slide';
-    const bulletsHtml = slide.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join('');
-    let imagesHtml = '';
-    if (slide.imagesLoading) {
-      imagesHtml = '<div class="slide-images">' + Array(5).fill('<div class="ph">loading…</div>').join('') + '</div>';
-    } else if (slide.images.length) {
-      imagesHtml = '<div class="slide-images">' + slide.images.map((img) =>
-        `<img src="${img.url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'image unavailable'}))">`
-      ).join('') + '</div>';
-    } else {
-      imagesHtml = '<div class="slide-images"><div class="ph">no images found</div></div>';
-    }
-    el.innerHTML = `
+
+  const idx = Math.min(Math.max(S.previewIndex, 0), S.slides.length - 1);
+  const slide = S.slides[idx];
+  const bulletsHtml = slide.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join('');
+  let imagesHtml = '';
+  if (slide.imagesLoading) {
+    imagesHtml = '<div class="slide-images">' + Array(5).fill('<div class="ph">…</div>').join('') + '</div>';
+  } else if (slide.images.length) {
+    imagesHtml = '<div class="slide-images">' + slide.images.map((img) =>
+      `<img src="${img.url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'—'}))">`
+    ).join('') + '</div>';
+  }
+
+  area.innerHTML = `
+    <div class="slide">
       <div class="slide-head">
         <div class="slide-topic">${escapeHtml(slide.topic)}</div>
         <div class="slide-title">${escapeHtml(slide.title)}</div>
         <ul class="slide-bullets">${bulletsHtml}</ul>
       </div>
       ${imagesHtml}
-      <div class="slide-meta">${fmtDate(slide.createdAt)}</div>
-    `;
-    deck.appendChild(el);
-  }
+    </div>`;
+
+  dots.innerHTML = S.slides.map((s, i) =>
+    `<button class="${i === idx ? 'active' : ''}" onclick="goToSlide(${i})" aria-label="Slide ${i + 1}"></button>`
+  ).join('');
+}
+
+function goToSlide(i) {
+  S.previewIndex = i;
+  renderPreview();
 }
 
 /* ============================ Session history (localStorage) ============================ */
@@ -413,10 +453,8 @@ function saveSessionToHistory() {
 
 function renderSessionsList() {
   const sessions = loadSessions();
-  const panel = $('sessionsPanel');
   const list = $('sessionsList');
-  if (!sessions.length) { panel.style.display = 'none'; return; }
-  panel.style.display = 'block';
+  if (!sessions.length) { list.innerHTML = '<div class="empty-note">No past sessions yet.</div>'; return; }
   list.innerHTML = '';
   for (const s of sessions) {
     const row = document.createElement('div');
@@ -426,9 +464,7 @@ function renderSessionsList() {
         <div>${fmtDate(s.startedAt)}</div>
         <div class="meta">${s.slides.length} slide${s.slides.length === 1 ? '' : 's'}</div>
       </div>
-      <div>
-        <button class="btn" data-act="view">View</button>
-      </div>
+      <div><button class="btn" data-act="view">View</button></div>
     `;
     row.querySelector('[data-act="view"]').addEventListener('click', () => viewPastSession(s));
     list.appendChild(row);
@@ -437,16 +473,19 @@ function renderSessionsList() {
 
 function viewPastSession(session) {
   if (S.listening) stopListening();
-  S.viewingPastSession = true;
   S.slides = session.slides;
+  S.previewIndex = S.slides.length - 1;
   S.sessionId = session.id;
   S.startedAt = session.startedAt;
   S.fullTranscript = session.fullTranscript || '';
-  renderDeck();
-  renderTranscript();
-  $('exportsRow').style.display = session.slides.length ? 'flex' : 'none';
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-  toast('Loaded past session — export it below.');
+  renderPreview();
+  closeSettings();
+  toast('Loaded past session — export it from Settings.');
+}
+
+function renderExportsAvailability() {
+  const row = $('exportsRow');
+  row.style.opacity = S.slides.length ? '1' : '.4';
 }
 
 /* ============================ Exports ============================ */
@@ -585,7 +624,4 @@ window.addEventListener('beforeunload', (e) => {
   if (S.listening) { e.preventDefault(); e.returnValue = ''; }
 });
 
-renderSessionsList();
-if (!speechSupported()) {
-  $('hintLine').innerHTML = '<b>Your browser does not support speech recognition.</b> Please open LiveSlides in Chrome or Edge (desktop or Android) to use the listening feature.';
-}
+renderPreview();
