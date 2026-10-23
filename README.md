@@ -7,20 +7,24 @@ notetaker, and automatically turns the conversation into a slide deck.
 
 1. Tap **Start listening**. Your microphone is recorded in short chunks and
    sent to OpenAI's Whisper for transcription — it works in any spoken
-   language automatically, no language needs to be picked.
-2. After about 30 seconds, the first slide appears on screen.
-3. Every 2 minutes after that, the new transcript since the last check is
-   sent to Claude to decide whether the topic has changed. If it has, a new
-   slide is generated and shown immediately: a title, 3-5 bullet points, and
-   up to 5 illustrative photos pulled from Wikimedia Commons — all in the
-   same language you're speaking.
-4. Tap **Stop listening** when you're done. The session saves to your
+   language automatically, no language needs to be picked. The running
+   transcript appears live under the button.
+2. Tap the **+** button whenever you want a slide: it summarizes everything
+   said since the last slide into a title, 3-5 bullet points, and up to 5
+   illustrative photos from Wikimedia Commons — all in the same language
+   you're speaking (or a language you pick in Settings). Nothing is generated
+   automatically; you're always in control of when a new slide is created.
+3. Tap **Stop listening** when you're done. The session saves to your
    browser automatically. Open Settings (⚙️) to download it as **JSON**,
    **PDF**, or **PPTX**, or to revisit past sessions.
 
-The screen itself stays minimal: a preview of the current slide (swipe
-between past slides via the dots), one Start/Stop button, and the settings
-gear in the corner.
+The screen itself stays minimal: a preview of the current slide (flip
+between past slides via the dots), the Start/Stop and "new slide" buttons
+with the live transcript beneath them, and a debug icon + settings gear in
+the corner. The debug panel shows a timestamped log of every recording
+chunk, transcription, and Claude request — including a warning whenever a
+chunk had no detectable microphone signal (so it's clear when the problem is
+your mic input rather than transcription itself).
 
 ## Requirements
 

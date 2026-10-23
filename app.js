@@ -10,26 +10,23 @@ const LS = {
   sessions: 'liveslides.sessions',
 };
 
-const FIRST_SLIDE_DELAY_MS = 30_000;   // first slide appears ~30s after start
-const RETRY_EMPTY_DELAY_MS = 10_000;   // if nothing said yet, retry sooner
-const CHECK_INTERVAL_MS = 90_000;      // topic re-check cadence: 90 seconds
 const CHUNK_MS = 12_000;               // length of each audio chunk sent to Whisper
+const SILENCE_PEAK_THRESHOLD = 3;      // byte-deviation (0-128) below which a chunk is treated as no-signal
 const MAX_SESSIONS_KEPT = 20;
 const ANTHROPIC_VERSION = '2023-06-01';
 
 const TOOL_SCHEMA = {
   name: 'report_topic_analysis',
-  description: 'Report whether the discussion topic has changed and, if so, provide slide content summarizing the new topic.',
+  description: 'Summarize the given transcript chunk into slide content.',
   input_schema: {
     type: 'object',
     properties: {
-      topic_changed: { type: 'boolean', description: 'True if this transcript chunk represents a new discussion topic (or this is the very first topic of the conversation).' },
       topic: { type: 'string', description: 'Short topic label, 2-5 words, in the output language given in the system prompt.' },
       title: { type: 'string', description: 'Slide title, concise, suitable as a presentation headline, in the output language given in the system prompt.' },
-      bullets: { type: 'array', items: { type: 'string' }, description: '3 to 5 short bullet points summarizing what was actually said about this topic, in the output language given in the system prompt. Never invent facts not present in the transcript.' },
+      bullets: { type: 'array', items: { type: 'string' }, description: '3 to 5 short bullet points summarizing what was actually said, in the output language given in the system prompt. Never invent facts not present in the transcript.' },
       image_query: { type: 'string', description: 'A short ENGLISH image-search query (2-4 words) that would find photos illustrating this topic, regardless of the transcript or output language.' },
     },
-    required: ['topic_changed', 'topic'],
+    required: ['topic', 'title', 'bullets'],
   },
 };
 
@@ -39,9 +36,8 @@ function buildSystemPrompt() {
     ? 'Write the topic, title and bullets in the SAME LANGUAGE as the transcript.'
     : `Always write the topic, title and bullets in ${lang}, translating from the transcript's own language if it differs. The transcript itself may be in any language - translate its meaning faithfully, don't just transliterate.`;
 
-  return `You are analyzing a live, real-time transcript of spoken conversation to automatically build a slide deck.
-You will be given the current topic (if any) and the most recent chunk of transcript. The transcript may be in any language.
-Decide whether this chunk represents a new discussion topic. If it does (or if there is no current topic yet), produce: a short topic label, a slide title, and 3-5 concise bullet points summarizing the key points actually said. ${langInstruction}
+  return `You are turning a chunk of live, real-time spoken-conversation transcript into one slide for a slide deck.
+The transcript may be in any language. Produce: a short topic label, a slide title, and 3-5 concise bullet points summarizing the key points actually said. ${langInstruction}
 Also produce a short ENGLISH image-search query (2-4 words), since image search only works in English.
 Base bullets only on what was actually said in the transcript chunk - never invent facts. Keep titles and bullets short and readable on a presentation slide. Always call the report_topic_analysis tool with your answer.`;
 }
@@ -53,15 +49,16 @@ const S = {
   micStream: null,
   recorderMime: '',
   activeRecorder: null,
+  audioCtx: null,
+  analyser: null,
+  volumeInterval: null,
+  chunkPeak: 0,
   fullTranscript: '',
   pending: '',
   slides: [],
   previewIndex: 0,
   currentTopic: null,
   startedAt: null,
-  timerHandle: null,
-  countdownHandle: null,
-  nextCheckAt: null,
   sessionId: null,
   debugLog: [],
 };
@@ -165,6 +162,38 @@ function extForMime(mime) {
   return 'webm';
 }
 
+function setupVolumeMonitor(stream) {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    S.audioCtx = new AudioCtx();
+    const source = S.audioCtx.createMediaStreamSource(stream);
+    S.analyser = S.audioCtx.createAnalyser();
+    S.analyser.fftSize = 512;
+    source.connect(S.analyser);
+    const data = new Uint8Array(S.analyser.frequencyBinCount);
+    S.volumeInterval = setInterval(() => {
+      S.analyser.getByteTimeDomainData(data);
+      let peak = 0;
+      for (let i = 0; i < data.length; i++) {
+        const dev = Math.abs(data[i] - 128);
+        if (dev > peak) peak = dev;
+      }
+      if (peak > S.chunkPeak) S.chunkPeak = peak;
+    }, 100);
+  } catch (e) {
+    console.warn('Volume monitor unavailable:', e);
+    logDebug('⚠ Could not start microphone level monitor: ' + e.message);
+  }
+}
+
+function teardownVolumeMonitor() {
+  if (S.volumeInterval) clearInterval(S.volumeInterval);
+  S.volumeInterval = null;
+  if (S.audioCtx) { try { S.audioCtx.close(); } catch (e) { /* ignore */ } }
+  S.audioCtx = null;
+  S.analyser = null;
+}
+
 function recordChunk(ms) {
   return new Promise((resolve) => {
     if (!S.listening || !S.micStream) return resolve(null);
@@ -184,11 +213,17 @@ function recordChunk(ms) {
 
 async function recordingLoop() {
   while (S.listening) {
+    S.chunkPeak = 0;
     const blob = await recordChunk(CHUNK_MS);
+    const peak = S.chunkPeak;
     if (!blob || !S.listening) continue;
     if (blob.size < 1000) { logDebug(`Recorded chunk too small (${blob.size}B) — skipped.`); continue; }
+    if (peak < SILENCE_PEAK_THRESHOLD) {
+      logDebug(`⚠ No audio signal detected in this chunk (level ${peak}/128) — skipped, not sent to Whisper. Check your microphone input/permissions/device.`);
+      continue;
+    }
     try {
-      logDebug(`Sending ${(blob.size / 1024).toFixed(1)}KB audio chunk to Whisper…`);
+      logDebug(`Sending ${(blob.size / 1024).toFixed(1)}KB audio chunk to Whisper (mic level ${peak}/128)…`);
       const text = await transcribeChunk(blob);
       const clean = (text || '').trim();
       if (clean) {
@@ -196,8 +231,9 @@ async function recordingLoop() {
         S.pending += clean + ' ';
         logDebug(`Transcribed: "${clean}"`);
         renderDebug();
+        renderLiveTranscript();
       } else {
-        logDebug('Transcribed: (silence / no speech detected)');
+        logDebug('Transcribed: (empty result)');
       }
     } catch (err) {
       console.warn('Transcription failed:', err);
@@ -270,25 +306,24 @@ async function startListening() {
   S.sessionId = uid();
   S.debugLog = [];
   renderPreview();
-  logDebug(`Listening started. Mic format: ${S.recorderMime || 'default'}. First slide in ${FIRST_SLIDE_DELAY_MS / 1000}s, then checks every ${CHECK_INTERVAL_MS / 1000}s.`);
+  logDebug(`Listening started. Mic format: ${S.recorderMime || 'default'}. Tap + any time to generate a slide from what's been said so far.`);
 
+  setupVolumeMonitor(stream);
   recordingLoop();
 
   $('listenBtnLabel').textContent = 'Stop listening';
   $('listenBtn').classList.add('active');
   $('listenIcon').outerHTML = '<span class="pulse" id="listenIcon"></span>';
   $('manualSlideBtn').hidden = false;
-
-  scheduleCheck(FIRST_SLIDE_DELAY_MS, 'first');
-  startCountdown();
+  $('liveTranscript').hidden = false;
+  $('statusCaption').textContent = 'Listening — tap + to generate a slide';
+  renderLiveTranscript();
 }
 
 function stopListening() {
   logDebug('Listening stopped.');
   S.listening = false;
-  clearTimeout(S.timerHandle);
-  clearInterval(S.countdownHandle);
-  S.nextCheckAt = null;
+  teardownVolumeMonitor();
   if (S.activeRecorder && S.activeRecorder.state !== 'inactive') { try { S.activeRecorder.stop(); } catch (e) { /* ignore */ } }
   if (S.micStream) { S.micStream.getTracks().forEach((t) => t.stop()); S.micStream = null; }
 
@@ -297,6 +332,7 @@ function stopListening() {
   const pulseEl = $('listenIcon');
   if (pulseEl) pulseEl.outerHTML = '<svg id="listenIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
   $('manualSlideBtn').hidden = true;
+  $('liveTranscript').hidden = true;
   $('statusCaption').textContent = '';
 
   if (S.slides.length) {
@@ -305,69 +341,32 @@ function stopListening() {
   }
 }
 
-function startCountdown() {
-  clearInterval(S.countdownHandle);
-  S.countdownHandle = setInterval(() => {
-    if (!S.listening) { clearInterval(S.countdownHandle); return; }
-    if (S.nextCheckAt) {
-      const secs = Math.max(0, Math.round((S.nextCheckAt - Date.now()) / 1000));
-      $('statusCaption').textContent = `Listening — next check in ${secs}s (${S.slides.length} slide${S.slides.length === 1 ? '' : 's'})`;
-    }
-  }, 1000);
+function renderLiveTranscript() {
+  const el = $('liveTranscript');
+  if (!el || el.hidden) return;
+  const said = S.fullTranscript.slice(0, S.fullTranscript.length - S.pending.length);
+  el.innerHTML = (said ? escapeHtml(said) : '') +
+    (S.pending ? '<span class="pending-span">' + escapeHtml(S.pending) + '</span>' : '') ||
+    '<span class="empty-note">Listening…</span>';
+  el.scrollTop = el.scrollHeight;
 }
 
-/* ============================ Topic check loop ============================ */
-
-function scheduleCheck(delay, mode) {
-  clearTimeout(S.timerHandle);
-  S.nextCheckAt = Date.now() + delay;
-  S.timerHandle = setTimeout(() => runCheck(mode), delay);
-}
-
-async function runCheck(mode) {
-  if (!S.listening) return;
-  const chunk = S.pending.trim();
-  S.pending = '';
-
-  if (!chunk) {
-    logDebug(`Check (${mode}) fired — nothing new said, skipping.`);
-    scheduleCheck(mode === 'first' ? RETRY_EMPTY_DELAY_MS : CHECK_INTERVAL_MS, mode);
-    return;
-  }
-
-  logDebug(`Check (${mode}) fired — requesting slide info from Claude for: "${chunk}"`);
-  try {
-    const result = await analyzeTopic(chunk, mode === 'first' ? null : S.currentTopic, mode);
-    if (result && (mode === 'first' || result.topic_changed)) {
-      logDebug(`→ New slide: "${result.title}"`);
-      await addSlide(result, chunk);
-      S.currentTopic = result.topic;
-    } else {
-      logDebug('→ Topic unchanged — no new slide.');
-    }
-  } catch (err) {
-    console.error('LiveSlides topic check failed:', err);
-    logDebug('⚠ Topic check failed: ' + err.message);
-    toast('Topic check failed: ' + err.message, true);
-    if (err.fatal) { stopListening(); return; }
-  }
-
-  if (S.listening) scheduleCheck(CHECK_INTERVAL_MS, 'check');
-}
+/* ============================ Slide generation (manual, on demand) ============================ */
 
 async function manualSlide() {
   if (!S.listening) return;
   const chunk = S.pending.trim();
   if (!chunk) { toast("Nothing new said since the last slide yet.", true); return; }
   S.pending = '';
+  renderLiveTranscript();
 
   const btn = $('manualSlideBtn');
   btn.disabled = true;
   toast('Generating slide…');
-  logDebug(`Manual slide requested — sending to Claude: "${chunk}"`);
+  logDebug(`Slide requested — sending to Claude: "${chunk}"`);
 
   try {
-    const result = await analyzeTopic(chunk, S.currentTopic, 'manual');
+    const result = await analyzeTopic(chunk, S.currentTopic);
     if (result) {
       logDebug(`→ New slide: "${result.title}"`);
       await addSlide(result, chunk);
@@ -378,24 +377,15 @@ async function manualSlide() {
     logDebug('⚠ Manual slide failed: ' + err.message);
     toast('Could not generate slide: ' + err.message, true);
     S.pending = chunk + ' ' + S.pending; // don't lose this transcript chunk on failure
+    renderLiveTranscript();
     if (err.fatal) { stopListening(); return; }
   } finally {
     btn.disabled = false;
   }
-
-  // restart the regular cadence from now, so it doesn't fire again moments later
-  if (S.listening) scheduleCheck(CHECK_INTERVAL_MS, 'check');
 }
 
-async function analyzeTopic(chunk, currentTopic, mode) {
-  let userMsg;
-  if (mode === 'first') {
-    userMsg = `Current topic: none (this is the start of the conversation).\n\nTranscript so far:\n"""${chunk}"""\n\nThis is the first check — always produce a topic and slide content from this transcript.`;
-  } else if (mode === 'manual') {
-    userMsg = `Current topic: "${currentTopic || 'none yet'}"\n\nTranscript since the last slide:\n"""${chunk}"""\n\nThe user tapped "New slide now" and wants a slide generated immediately from this transcript, whether or not it's a brand-new topic. Always produce topic/title/bullets summarizing this chunk.`;
-  } else {
-    userMsg = `Current topic: "${currentTopic}"\n\nNew transcript since the last check:\n"""${chunk}"""\n\nDecide if the topic has changed meaningfully. If yes, produce updated slide content for the NEW topic based only on this new chunk.`;
-  }
+async function analyzeTopic(chunk, currentTopic) {
+  const userMsg = `Current topic so far: "${currentTopic || 'none yet'}"\n\nTranscript since the last slide:\n"""${chunk}"""\n\nSummarize this transcript chunk into slide content (topic/title/bullets).`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
