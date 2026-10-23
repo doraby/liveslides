@@ -561,6 +561,7 @@ async function fetchCommonsImages(query, count) {
 function renderPreview() {
   const area = $('previewArea');
   const dots = $('previewDots');
+  $('saveSlidesBtn').hidden = S.slides.length === 0;
 
   if (!S.slides.length) {
     area.innerHTML = `
@@ -676,6 +677,7 @@ function exportJSON() {
   if (!S.slides.length) { toast('No slides to export yet.', true); return; }
   const blob = new Blob([JSON.stringify(currentSessionObject(), null, 2)], { type: 'application/json' });
   downloadBlob(blob, `liveslides-${dateStamp()}.json`);
+  toast(`Saved ${S.slides.length} slide${S.slides.length === 1 ? '' : 's'} as JSON.`);
 }
 
 function downloadBlob(blob, filename) {
@@ -802,6 +804,7 @@ function wireUpButtons() {
   $('debugCloseBtn').addEventListener('click', closeDebug);
   $('listenBtn').addEventListener('click', toggleListening);
   $('manualSlideBtn').addEventListener('click', manualSlide);
+  $('saveSlidesBtn').addEventListener('click', exportJSON);
   $('settingsCloseBtn').addEventListener('click', closeSettings);
   $('settingsSaveBtn').addEventListener('click', saveSettings);
   $('exportJsonBtn').addEventListener('click', exportJSON);
