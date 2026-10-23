@@ -102,7 +102,7 @@ function saveSettings() {
   closeSettings();
   toast('Settings saved');
 }
-$('settingsBackdrop')?.addEventListener('click', (e) => { if (e.target.id === 'settingsBackdrop') closeSettings(); });
+$('settingsBackdrop').addEventListener('click', (e) => { if (e.target.id === 'settingsBackdrop') closeSettings(); });
 
 /* ============================ Mic + Whisper transcription ============================ */
 
@@ -423,7 +423,7 @@ function renderPreview() {
     </div>`;
 
   dots.innerHTML = S.slides.map((s, i) =>
-    `<button class="${i === idx ? 'active' : ''}" onclick="goToSlide(${i})" aria-label="Slide ${i + 1}"></button>`
+    `<button class="${i === idx ? 'active' : ''}" data-index="${i}" aria-label="Slide ${i + 1}"></button>`
   ).join('');
 }
 
@@ -624,4 +624,26 @@ window.addEventListener('beforeunload', (e) => {
   if (S.listening) { e.preventDefault(); e.returnValue = ''; }
 });
 
-renderPreview();
+function wireUpButtons() {
+  $('settingsBtn').addEventListener('click', openSettings);
+  $('listenBtn').addEventListener('click', toggleListening);
+  $('settingsCloseBtn').addEventListener('click', closeSettings);
+  $('settingsSaveBtn').addEventListener('click', saveSettings);
+  $('exportJsonBtn').addEventListener('click', exportJSON);
+  $('exportPdfBtn').addEventListener('click', exportPDF);
+  $('exportPptxBtn').addEventListener('click', exportPPTX);
+  $('previewDots').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-index]');
+    if (btn) goToSlide(Number(btn.dataset.index));
+  });
+}
+
+try {
+  wireUpButtons();
+  renderPreview();
+} catch (e) {
+  console.error('LiveSlides failed to initialize:', e);
+  document.body.insertAdjacentHTML('afterbegin',
+    '<div style="position:fixed;inset:0;z-index:999;background:#b3432b;color:#fff;padding:16px;font:14px/1.5 sans-serif;">LiveSlides failed to start: ' +
+    String(e.message || e).replace(/</g, '&lt;') + '</div>');
+}
