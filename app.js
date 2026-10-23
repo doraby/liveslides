@@ -580,6 +580,7 @@ function renderPreview() {
   const area = $('previewArea');
   const dots = $('previewDots');
   $('saveSlidesBtn').hidden = S.slides.length === 0;
+  $('slideNav').hidden = S.slides.length === 0;
 
   if (!S.slides.length) {
     area.innerHTML = `
@@ -605,6 +606,9 @@ function renderPreview() {
 
   area.innerHTML = `
     <div class="slide">
+      <button class="slide-delete-btn" data-action="delete-slide" title="Delete this slide" aria-label="Delete this slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+      </button>
       <div class="slide-head">
         <div class="slide-topic">${escapeHtml(slide.topic)}</div>
         <div class="slide-title">${escapeHtml(slide.title)}</div>
@@ -616,11 +620,26 @@ function renderPreview() {
   dots.innerHTML = S.slides.map((s, i) =>
     `<button class="${i === idx ? 'active' : ''}" data-index="${i}" aria-label="Slide ${i + 1}"></button>`
   ).join('');
+
+  $('prevSlideBtn').disabled = idx <= 0;
+  $('nextSlideBtn').disabled = idx >= S.slides.length - 1;
 }
 
 function goToSlide(i) {
   S.previewIndex = i;
   renderPreview();
+}
+
+function prevSlide() { if (S.previewIndex > 0) goToSlide(S.previewIndex - 1); }
+function nextSlide() { if (S.previewIndex < S.slides.length - 1) goToSlide(S.previewIndex + 1); }
+
+function deleteCurrentSlide() {
+  if (!S.slides.length) return;
+  const idx = Math.min(Math.max(S.previewIndex, 0), S.slides.length - 1);
+  S.slides.splice(idx, 1);
+  S.previewIndex = Math.min(idx, S.slides.length - 1);
+  renderPreview();
+  toast('Slide deleted.');
 }
 
 /* ============================ Session history (localStorage) ============================ */
@@ -831,6 +850,11 @@ function wireUpButtons() {
   $('previewDots').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-index]');
     if (btn) goToSlide(Number(btn.dataset.index));
+  });
+  $('prevSlideBtn').addEventListener('click', prevSlide);
+  $('nextSlideBtn').addEventListener('click', nextSlide);
+  $('previewArea').addEventListener('click', (e) => {
+    if (e.target.closest('[data-action="delete-slide"]')) deleteCurrentSlide();
   });
 }
 

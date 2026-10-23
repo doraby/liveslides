@@ -52,10 +52,17 @@
   .preview-wrap{width:100%; flex:1; min-height:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;}
   #previewArea{width:100%; display:flex; justify-content:center;}
   .slide{
-    width:100%; max-width:720px; aspect-ratio:16/9; background:var(--surface); border:1px solid var(--border);
+    position:relative; width:100%; max-width:720px; aspect-ratio:16/9; background:var(--surface); border:1px solid var(--border);
     border-radius:var(--radius); overflow:hidden; display:flex; flex-direction:row;
     box-shadow:0 10px 30px rgba(0,0,0,.06);
   }
+  .slide-delete-btn{
+    position:absolute; top:8px; right:8px; z-index:5; width:28px; height:28px; border-radius:50%;
+    border:none; background:rgba(20,18,14,.45); color:#fff; display:flex; align-items:center; justify-content:center;
+    cursor:pointer; transition:background .15s;
+  }
+  .slide-delete-btn:hover{background:rgba(179,67,43,.85);}
+  .slide-delete-btn svg{width:14px; height:14px;}
   .slide-head{flex:1.3; min-width:0; padding:5%; overflow-y:auto;}
   .slide-topic{font-size:.72em; text-transform:uppercase; letter-spacing:.08em; color:var(--accent-2); font-weight:700;}
   .slide-title{font-family:var(--serif); font-size:clamp(16px,3vw,28px); margin:.25em 0 .5em; line-height:1.2;}
@@ -74,6 +81,8 @@
   }
   .empty-slide svg{width:38px; height:38px; opacity:.5;}
 
+  .slide-nav{display:flex; align-items:center; gap:4px;}
+  .slide-nav .icon-btn:disabled{opacity:.3; cursor:not-allowed;}
   .dots{display:flex; gap:7px; flex:none;}
   .dots button{
     width:8px; height:8px; border-radius:50%; border:none; background:var(--border); cursor:pointer; padding:0;
@@ -186,7 +195,15 @@
 <main>
   <div class="preview-wrap">
     <div id="previewArea"></div>
-    <div class="dots" id="previewDots"></div>
+    <div class="slide-nav" id="slideNav" hidden>
+      <button class="icon-btn" id="prevSlideBtn" aria-label="Previous slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="dots" id="previewDots"></div>
+      <button class="icon-btn" id="nextSlideBtn" aria-label="Next slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
   </div>
 
   <div class="action">
