@@ -46,7 +46,8 @@ Base bullets only on what was actually said in the transcript chunk - never inve
 
 const S = {
   listening: false,
-  micStream: null,
+  micStream: null,       // audio-only stream actually fed to MediaRecorder/analyser
+  displayStream: null,   // the full getDisplayMedia stream (incl. video track), kept alive so the browser's native "stop sharing" control and its 'ended' event keep working
   recorderMime: '',
   activeRecorder: null,
   audioCtx: null,
@@ -207,7 +208,7 @@ async function setupVolumeMonitor(stream) {
     }, 100);
   } catch (e) {
     console.warn('Volume monitor unavailable:', e);
-    logDebug('⚠ Could not start microphone level monitor: ' + e.message + ' — silence detection disabled, all chunks will be sent.');
+    logDebug('⚠ Could not start audio level monitor: ' + e.message + ' — silence detection disabled, all chunks will be sent.');
   }
 }
 
@@ -221,10 +222,10 @@ function teardownVolumeMonitor() {
 
 function recordChunk(ms) {
   return new Promise((resolve) => {
-    if (!S.listening || !S.micStream) { logDebug('recordChunk: not listening or no mic stream — aborting.'); return resolve(null); }
+    if (!S.listening || !S.micStream) { logDebug('recordChunk: not listening or no capture stream — aborting.'); return resolve(null); }
     const tracks = S.micStream.getAudioTracks();
     if (!tracks.length || tracks[0].readyState !== 'live' || tracks[0].muted) {
-      logDebug(`⚠ Mic track state looks wrong (tracks: ${tracks.length}, readyState: ${tracks[0]?.readyState}, muted: ${tracks[0]?.muted}).`);
+      logDebug(`⚠ Captured audio track state looks wrong (tracks: ${tracks.length}, readyState: ${tracks[0]?.readyState}, muted: ${tracks[0]?.muted}).`);
     }
     const chunks = [];
     let rec;
@@ -266,7 +267,7 @@ async function recordingLoop() {
     const looksSilent = monitorHealthy && peak < SILENCE_PEAK_THRESHOLD;
     if (looksSilent && S.consecutiveSilentSkips < 2) {
       S.consecutiveSilentSkips++;
-      logDebug(`⚠ No audio signal detected in this chunk (level ${peak}/128) — skipped, not sent to Whisper. Check your microphone input/permissions/device.`);
+      logDebug(`⚠ No audio signal detected in this chunk (level ${peak}/128) — skipped, not sent to Whisper. Check that audio is actually playing in the shared tab/screen.`);
       continue;
     }
     S.consecutiveSilentSkips = 0;
@@ -325,8 +326,8 @@ function toggleListening() {
 }
 
 async function startListening() {
-  if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    toast('This browser does not support microphone recording.', true);
+  if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    toast('This browser does not support tab/system audio capture.', true);
     return;
   }
   if (!getOpenaiKey() || !getAnthropicKey()) {
@@ -335,15 +336,32 @@ async function startListening() {
     return;
   }
 
-  let stream;
+  let displayStream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // video is required by the API to show the share picker; audio is what we actually want.
+    // displaySurface:'browser' nudges Chrome to default to "Chrome Tab", the option most
+    // reliably offering an audio checkbox across platforms (macOS in particular won't offer
+    // audio for a plain window share).
+    displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: 'browser' },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
   } catch (e) {
-    toast('Microphone access denied.', true);
+    toast('Sharing was cancelled or denied.', true);
     return;
   }
 
+  const audioTracks = displayStream.getAudioTracks();
+  if (!audioTracks.length) {
+    displayStream.getTracks().forEach((t) => t.stop());
+    toast('No audio was shared — pick "Chrome Tab" (or "Entire Screen") and check "Share tab audio".', true);
+    return;
+  }
+
+  const stream = new MediaStream(audioTracks);
+
   S.listening = true;
+  S.displayStream = displayStream;
   S.micStream = stream;
   S.recorderMime = pickRecorderMime();
   S.fullTranscript = '';
@@ -355,12 +373,20 @@ async function startListening() {
   S.sessionId = uid();
   S.debugLog = [];
   renderPreview();
-  logDebug(`Listening started. Mic format: ${S.recorderMime || 'default'}. Tap + any time to generate a slide from what's been said so far.`);
+  logDebug(`Listening started. Capture format: ${S.recorderMime || 'default'}. Tap + any time to generate a slide from what's been said so far.`);
   try {
     const track = stream.getAudioTracks()[0];
     const settings = track?.getSettings ? track.getSettings() : {};
-    logDebug(`Mic track: "${track?.label || 'unknown device'}" — readyState: ${track?.readyState}, muted: ${track?.muted}, sampleRate: ${settings.sampleRate || '?'}, channels: ${settings.channelCount || '?'}.`);
+    logDebug(`Captured audio track: "${track?.label || 'unknown source'}" — readyState: ${track?.readyState}, muted: ${track?.muted}, sampleRate: ${settings.sampleRate || '?'}, channels: ${settings.channelCount || '?'}.`);
   } catch (e) { /* ignore, purely diagnostic */ }
+
+  // If the user stops sharing via the browser's own "Stop sharing" control (rather than
+  // our Stop button), detect it and shut down cleanly instead of recording silence forever.
+  const onShareEnded = () => {
+    if (S.listening) { toast('Screen/tab sharing stopped.', true); stopListening(); }
+  };
+  displayStream.getVideoTracks().forEach((t) => t.addEventListener('ended', onShareEnded));
+  audioTracks.forEach((t) => t.addEventListener('ended', onShareEnded));
 
   recordingLoop(); // must start immediately; never gated behind the diagnostic monitor below
   setupVolumeMonitor(stream);
@@ -380,11 +406,12 @@ function stopListening() {
   teardownVolumeMonitor();
   if (S.activeRecorder && S.activeRecorder.state !== 'inactive') { try { S.activeRecorder.stop(); } catch (e) { /* ignore */ } }
   if (S.micStream) { S.micStream.getTracks().forEach((t) => t.stop()); S.micStream = null; }
+  if (S.displayStream) { S.displayStream.getTracks().forEach((t) => t.stop()); S.displayStream = null; }
 
   $('listenBtnLabel').textContent = 'Start listening';
   $('listenBtn').classList.remove('active');
   const pulseEl = $('listenIcon');
-  if (pulseEl) pulseEl.outerHTML = '<svg id="listenIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+  if (pulseEl) pulseEl.outerHTML = '<svg id="listenIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
   $('manualSlideBtn').hidden = true;
   $('liveTranscript').hidden = true;
   $('statusCaption').textContent = '';
