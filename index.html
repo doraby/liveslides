@@ -174,11 +174,32 @@
     <div class="field">
       <label for="inAnthropicKey">Anthropic API key (summaries)</label>
       <input type="password" id="inAnthropicKey" placeholder="sk-ant-...">
-      <div class="note">Used to detect topic changes and write slide titles/bullets, in the same language you're speaking. Stored only in your browser, sent only to <b>api.anthropic.com</b>.</div>
+      <div class="note">Used to detect topic changes and write slide titles/bullets. Stored only in your browser, sent only to <b>api.anthropic.com</b>.</div>
     </div>
     <div class="field">
       <label for="inModel">Anthropic model</label>
       <input type="text" id="inModel" placeholder="claude-sonnet-5">
+    </div>
+    <div class="field">
+      <label for="inSlideLang">Slide language</label>
+      <select id="inSlideLang">
+        <option value="auto">Auto (match spoken language)</option>
+        <option value="English">English</option>
+        <option value="Russian">Русский</option>
+        <option value="Ukrainian">Українська</option>
+        <option value="Polish">Polski</option>
+        <option value="Spanish">Español</option>
+        <option value="French">Français</option>
+        <option value="German">Deutsch</option>
+        <option value="Italian">Italiano</option>
+        <option value="Portuguese">Português</option>
+        <option value="Turkish">Türkçe</option>
+        <option value="Arabic">العربية</option>
+        <option value="Chinese">中文</option>
+        <option value="Japanese">日本語</option>
+        <option value="Korean">한국어</option>
+      </select>
+      <div class="note">Slide titles and bullets are translated into this language, whatever language you actually speak in. Set this before you start listening.</div>
     </div>
 
     <h3>Session</h3>

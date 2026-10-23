@@ -6,6 +6,7 @@ const LS = {
   anthropicKey: 'liveslides.anthropicKey',
   openaiKey: 'liveslides.openaiKey',
   model: 'liveslides.model',
+  slideLang: 'liveslides.slideLang',
   sessions: 'liveslides.sessions',
 };
 
@@ -23,19 +24,27 @@ const TOOL_SCHEMA = {
     type: 'object',
     properties: {
       topic_changed: { type: 'boolean', description: 'True if this transcript chunk represents a new discussion topic (or this is the very first topic of the conversation).' },
-      topic: { type: 'string', description: 'Short topic label, 2-5 words, in the same language as the transcript.' },
-      title: { type: 'string', description: 'Slide title, concise, suitable as a presentation headline, in the same language as the transcript.' },
-      bullets: { type: 'array', items: { type: 'string' }, description: '3 to 5 short bullet points summarizing what was actually said about this topic, in the same language as the transcript. Never invent facts not present in the transcript.' },
-      image_query: { type: 'string', description: 'A short ENGLISH image-search query (2-4 words) that would find photos illustrating this topic, regardless of the transcript language.' },
+      topic: { type: 'string', description: 'Short topic label, 2-5 words, in the output language given in the system prompt.' },
+      title: { type: 'string', description: 'Slide title, concise, suitable as a presentation headline, in the output language given in the system prompt.' },
+      bullets: { type: 'array', items: { type: 'string' }, description: '3 to 5 short bullet points summarizing what was actually said about this topic, in the output language given in the system prompt. Never invent facts not present in the transcript.' },
+      image_query: { type: 'string', description: 'A short ENGLISH image-search query (2-4 words) that would find photos illustrating this topic, regardless of the transcript or output language.' },
     },
     required: ['topic_changed', 'topic'],
   },
 };
 
-const SYSTEM_PROMPT = `You are analyzing a live, real-time transcript of spoken conversation to automatically build a slide deck.
+function buildSystemPrompt() {
+  const lang = getSlideLang();
+  const langInstruction = (!lang || lang === 'auto')
+    ? 'Write the topic, title and bullets in the SAME LANGUAGE as the transcript.'
+    : `Always write the topic, title and bullets in ${lang}, translating from the transcript's own language if it differs. The transcript itself may be in any language - translate its meaning faithfully, don't just transliterate.`;
+
+  return `You are analyzing a live, real-time transcript of spoken conversation to automatically build a slide deck.
 You will be given the current topic (if any) and the most recent chunk of transcript. The transcript may be in any language.
-Decide whether this chunk represents a new discussion topic. If it does (or if there is no current topic yet), produce: a short topic label, a slide title, and 3-5 concise bullet points summarizing the key points actually said - all written in the SAME LANGUAGE as the transcript. Also produce a short ENGLISH image-search query (2-4 words), since image search only works in English.
+Decide whether this chunk represents a new discussion topic. If it does (or if there is no current topic yet), produce: a short topic label, a slide title, and 3-5 concise bullet points summarizing the key points actually said. ${langInstruction}
+Also produce a short ENGLISH image-search query (2-4 words), since image search only works in English.
 Base bullets only on what was actually said in the transcript chunk - never invent facts. Keep titles and bullets short and readable on a presentation slide. Always call the report_topic_analysis tool with your answer.`;
+}
 
 /* ============================ State ============================ */
 
@@ -63,6 +72,7 @@ function $(id) { return document.getElementById(id); }
 function getAnthropicKey() { return localStorage.getItem(LS.anthropicKey) || ''; }
 function getOpenaiKey() { return localStorage.getItem(LS.openaiKey) || ''; }
 function getModel() { return localStorage.getItem(LS.model) || 'claude-sonnet-5'; }
+function getSlideLang() { return localStorage.getItem(LS.slideLang) || 'auto'; }
 
 function toast(msg, isError) {
   const el = document.createElement('div');
@@ -90,6 +100,7 @@ function openSettings() {
   $('inOpenaiKey').value = getOpenaiKey();
   $('inAnthropicKey').value = getAnthropicKey();
   $('inModel').value = getModel();
+  $('inSlideLang').value = getSlideLang();
   renderSessionsList();
   renderExportsAvailability();
   $('settingsBackdrop').classList.add('open');
@@ -99,6 +110,7 @@ function saveSettings() {
   localStorage.setItem(LS.openaiKey, $('inOpenaiKey').value.trim());
   localStorage.setItem(LS.anthropicKey, $('inAnthropicKey').value.trim());
   localStorage.setItem(LS.model, $('inModel').value.trim() || 'claude-sonnet-5');
+  localStorage.setItem(LS.slideLang, $('inSlideLang').value);
   closeSettings();
   toast('Settings saved');
 }
@@ -307,7 +319,7 @@ async function analyzeTopic(chunk, currentTopic, isFirst) {
     body: JSON.stringify({
       model: getModel(),
       max_tokens: 600,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(),
       messages: [{ role: 'user', content: userMsg }],
       tools: [TOOL_SCHEMA],
       tool_choice: { type: 'tool', name: 'report_topic_analysis' },
