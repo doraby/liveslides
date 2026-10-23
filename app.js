@@ -53,6 +53,7 @@ const S = {
   analyser: null,
   volumeInterval: null,
   chunkPeak: 0,
+  consecutiveSilentSkips: 0,
   fullTranscript: '',
   pending: '',
   slides: [],
@@ -162,10 +163,22 @@ function extForMime(mime) {
   return 'webm';
 }
 
-function setupVolumeMonitor(stream) {
+async function setupVolumeMonitor(stream) {
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     S.audioCtx = new AudioCtx();
+    // AudioContexts created after an `await` can start life 'suspended' (the
+    // user-gesture that unlocked audio no longer covers this async point),
+    // which makes the analyser read flat silence forever regardless of real
+    // mic input. Explicitly resume and confirm it actually took.
+    if (S.audioCtx.state !== 'running') {
+      try { await S.audioCtx.resume(); } catch (e) { /* ignore, logged below via state check */ }
+    }
+    logDebug(`Mic level monitor ready (AudioContext state: ${S.audioCtx.state}).`);
+    if (S.audioCtx.state !== 'running') {
+      logDebug('⚠ AudioContext did not resume — mic level readings may be unreliable; silence detection will fail open.');
+    }
+
     const source = S.audioCtx.createMediaStreamSource(stream);
     S.analyser = S.audioCtx.createAnalyser();
     S.analyser.fftSize = 512;
@@ -182,7 +195,7 @@ function setupVolumeMonitor(stream) {
     }, 100);
   } catch (e) {
     console.warn('Volume monitor unavailable:', e);
-    logDebug('⚠ Could not start microphone level monitor: ' + e.message);
+    logDebug('⚠ Could not start microphone level monitor: ' + e.message + ' — silence detection disabled, all chunks will be sent.');
   }
 }
 
@@ -218,10 +231,19 @@ async function recordingLoop() {
     const peak = S.chunkPeak;
     if (!blob || !S.listening) continue;
     if (blob.size < 1000) { logDebug(`Recorded chunk too small (${blob.size}B) — skipped.`); continue; }
-    if (peak < SILENCE_PEAK_THRESHOLD) {
+
+    // Fail OPEN, not closed: a broken/suspended level monitor must never permanently
+    // block transcription. Only skip on low readings if the monitor looks healthy, and
+    // always send anyway after a couple of consecutive "silent" skips in a row.
+    const monitorHealthy = !!S.analyser && S.audioCtx && S.audioCtx.state === 'running';
+    const looksSilent = monitorHealthy && peak < SILENCE_PEAK_THRESHOLD;
+    if (looksSilent && S.consecutiveSilentSkips < 2) {
+      S.consecutiveSilentSkips++;
       logDebug(`⚠ No audio signal detected in this chunk (level ${peak}/128) — skipped, not sent to Whisper. Check your microphone input/permissions/device.`);
       continue;
     }
+    S.consecutiveSilentSkips = 0;
+
     try {
       logDebug(`Sending ${(blob.size / 1024).toFixed(1)}KB audio chunk to Whisper (mic level ${peak}/128)…`);
       const text = await transcribeChunk(blob);
@@ -308,7 +330,7 @@ async function startListening() {
   renderPreview();
   logDebug(`Listening started. Mic format: ${S.recorderMime || 'default'}. Tap + any time to generate a slide from what's been said so far.`);
 
-  setupVolumeMonitor(stream);
+  await setupVolumeMonitor(stream);
   recordingLoop();
 
   $('listenBtnLabel').textContent = 'Stop listening';
